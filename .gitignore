@@ -1,0 +1,40 @@
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+.venv/
+venv/
+
+# Test/cache artifacts
+.pytest_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# Local config/secrets
+.env
+
+# Local databases/runtime
+*.db
+
+# IDE/editor local files
+.idea
+.idea/
+.vscode
+.vscode/
+
+# Local tool state
+.claude/
+
+# Accidental shell/device files in this environment
+.bash_profile
+.bashrc
+.gitconfig
+.gitmodules
+.mcp.json
+.profile
+.ripgreprc
+.zprofile
+.zshrc

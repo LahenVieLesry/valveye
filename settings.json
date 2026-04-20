@@ -1,0 +1,17 @@
+{
+  "env": {
+    "ANTHROPIC_BASE_URL": "http://localhost:4141",
+    "ANTHROPIC_AUTH_TOKEN": "dummy",
+    "ANTHROPIC_MODEL": "gemini-3.1-pro-preview",
+    "ANTHROPIC_DEFAULT_SONNET_MODEL": "gemini-3.1-pro-preview",
+    "ANTHROPIC_SMALL_FAST_MODEL": "gpt-5.3-codex",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL": "gpt-5.3-codex",
+    "DISABLE_NON_ESSENTIAL_MODEL_CALLS": "1",
+    "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
+    "HTTP_PROXY": "http://127.0.0.1:7890",
+    "HTTPS_PROXY": "http://127.0.0.1:7890"
+  },
+  "includeCoAuthoredBy": false,
+  "language": "schinese",
+  "skipWebFetchPreflight": true
+}
