@@ -1,6 +1,11 @@
+# valveye
+
 一个基于langchain的steam agent，能查询游戏史低价格，推荐相关类型的游戏以及订阅游戏史低通知。
+
 史低价格查询优先用第三方公开接口（如 IsThereAnyDeal / steamdb / CheapShark 等）。
+
 通知方式包含邮件 Email，Telegram Bot，企业微信/飞书/钉钉 Webhook，Discord Webhook，Tencent QQ等。
+
 每天固定时间（冬令时为UTC+1，夏令时为UTC+2）检测订阅游戏是否史低，史低或新史低时发送通知提醒。
 
 
