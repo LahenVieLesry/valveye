@@ -117,7 +117,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     r = sub.add_parser("recommend", help="推荐同类游戏")
     r.add_argument("--game", required=True)
-    r.add_argument("--top", type=int, default=5)
+    r.add_argument("--top", type=int, default=15)
 
     s = sub.add_parser("subscribe", help="订阅游戏史低提醒")
     s.add_argument("--user", required=True)
