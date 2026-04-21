@@ -35,3 +35,40 @@ class Subscription:
     active: bool
     last_notified_low: float | None
     last_notified_at: datetime | None
+
+
+@dataclass(slots=True)
+class RecommendationReason:
+    tag_overlap: list[str] = field(default_factory=list)
+    matched_signals: list[str] = field(default_factory=list)
+    downside: str = ""
+
+
+@dataclass(slots=True)
+class RecommendationItem:
+    title: str
+    app_id: int
+    score: float
+    tags: list[str] = field(default_factory=list)
+    similarity_breakdown: dict[str, float] = field(default_factory=dict)
+    reason: RecommendationReason = field(default_factory=RecommendationReason)
+    source_signals: list[str] = field(default_factory=list)
+    thumb: str | None = None
+
+    def to_dict(self) -> dict:
+        return {
+            "title": self.title,
+            "app_id": self.app_id,
+            "score": round(self.score, 4),
+            "tags": self.tags,
+            "similarity_breakdown": {
+                key: round(float(value), 4) for key, value in self.similarity_breakdown.items()
+            },
+            "reason": {
+                "tag_overlap": self.reason.tag_overlap,
+                "matched_signals": self.reason.matched_signals,
+                "downside": self.reason.downside,
+            },
+            "source_signals": self.source_signals,
+            "thumb": self.thumb,
+        }

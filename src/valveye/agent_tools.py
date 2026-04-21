@@ -23,7 +23,7 @@ def build_tools(price_service: PriceService, recommender: Recommender, repo: Sub
 
     @tool
     async def recommend_similar_games(game: str, top_n: int = 5) -> str:
-        """推荐同类游戏（轻量策略），返回 JSON。"""
+        """推荐同类游戏（标签+相似产品+差评摘要），返回结构化 JSON。"""
         result = await recommender.recommend(game_query=game, top_n=top_n)
         return json.dumps(result, ensure_ascii=False)
 

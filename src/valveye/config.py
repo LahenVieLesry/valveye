@@ -25,6 +25,12 @@ class Settings:
     itad_base_url: str = os.getenv("ITAD_BASE_URL", "https://api.isthereanydeal.com")
     steamdb_api_base: str = os.getenv("STEAMDB_API_BASE", "")
     cheapshark_base_url: str = os.getenv("CHEAPSHARK_BASE_URL", "https://www.cheapshark.com/api/1.0")
+    steam_store_base_url: str = os.getenv("STEAM_STORE_BASE_URL", "https://store.steampowered.com")
+    steam_web_api_base_url: str = os.getenv("STEAM_WEB_API_BASE_URL", "https://api.steampowered.com")
+    steamspy_api_base_url: str = os.getenv("STEAMSPY_API_BASE_URL", "https://steamspy.com")
+    steam_recommend_timeout_sec: int = int(os.getenv("STEAM_RECOMMEND_TIMEOUT_SEC", "15"))
+    steam_recommend_candidate_pool: int = int(os.getenv("STEAM_RECOMMEND_CANDIDATE_POOL", "60"))
+    steam_recommend_negative_review_count: int = int(os.getenv("STEAM_RECOMMEND_NEGATIVE_REVIEW_COUNT", "2"))
 
     check_local_hour: int = int(os.getenv("CHECK_LOCAL_HOUR", "9"))
     check_local_minute: int = int(os.getenv("CHECK_LOCAL_MINUTE", "0"))
