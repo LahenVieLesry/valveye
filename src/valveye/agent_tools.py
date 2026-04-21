@@ -38,7 +38,7 @@ def build_tools(price_service: PriceService, recommender: Recommender, repo: Sub
     ) -> str:
         """订阅游戏价格提醒，channels_json 是通知渠道 JSON 数组。"""
         channels = json.loads(channels_json)
-        sub_id = repo.add(
+        sub_id, created = repo.add(
             user_id=user_id,
             game_query=game,
             window=window,
@@ -46,7 +46,9 @@ def build_tools(price_service: PriceService, recommender: Recommender, repo: Sub
             currency=currency,
             channels=channels,
         )
-        return f"订阅成功，ID={sub_id}"
+        if created:
+            return f"订阅成功，ID={sub_id}"
+        return f"订阅已存在，ID={sub_id}"
 
     @tool
     def list_subscriptions() -> str:

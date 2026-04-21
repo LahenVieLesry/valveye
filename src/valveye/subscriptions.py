@@ -44,16 +44,59 @@ class SubscriptionRepository:
         region: str,
         currency: str,
         channels: list[dict],
-    ) -> int:
+    ) -> tuple[int, bool]:
+        existing = self.find_active_duplicate(
+            user_id=user_id,
+            game_query=game_query,
+            window=window,
+            region=region,
+            currency=currency,
+            channels=channels,
+        )
+        if existing is not None:
+            return existing.id, False
+
         with self._connect() as conn:
             cur = conn.execute(
                 """
                 INSERT INTO subscriptions (user_id, game_query, window, region, currency, channels_json)
                 VALUES (?, ?, ?, ?, ?, ?)
                 """,
-                (user_id, game_query, window, region, currency, json.dumps(channels, ensure_ascii=False)),
+                (
+                    user_id,
+                    game_query,
+                    window,
+                    region,
+                    currency,
+                    self._channels_to_json(channels),
+                ),
             )
-            return int(cur.lastrowid)
+            return int(cur.lastrowid), True
+
+    def find_active_duplicate(
+        self,
+        user_id: str,
+        game_query: str,
+        window: str,
+        region: str,
+        currency: str,
+        channels: list[dict],
+    ) -> Subscription | None:
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT * FROM subscriptions
+                WHERE active=1 AND user_id=? AND game_query=? AND window=? AND region=? AND currency=?
+                ORDER BY id DESC
+                """,
+                (user_id, game_query, window, region, currency),
+            ).fetchall()
+
+        normalized_channels = self._channels_to_json(channels)
+        for row in rows:
+            if self._channels_to_json(json.loads(row["channels_json"])) == normalized_channels:
+                return self._to_sub(row)
+        return None
 
     def list_active(self) -> list[Subscription]:
         with self._connect() as conn:
@@ -71,6 +114,10 @@ class SubscriptionRepository:
                 "UPDATE subscriptions SET last_notified_low=?, last_notified_at=? WHERE id=?",
                 (low_price, now, sub_id),
             )
+
+    @staticmethod
+    def _channels_to_json(channels: list[dict]) -> str:
+        return json.dumps(channels, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
     @staticmethod
     def _to_sub(row: sqlite3.Row) -> Subscription:

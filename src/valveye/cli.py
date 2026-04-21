@@ -58,7 +58,7 @@ async def _run(args: argparse.Namespace) -> int:
 
     if args.command == "subscribe":
         channels = json.loads(args.channels)
-        sub_id = repo.add(
+        sub_id, created = repo.add(
             user_id=args.user,
             game_query=args.game,
             window=args.window,
@@ -66,7 +66,10 @@ async def _run(args: argparse.Namespace) -> int:
             currency=args.currency,
             channels=channels,
         )
-        print(f"订阅创建成功: {sub_id}")
+        if created:
+            print(f"订阅创建成功: {sub_id}")
+        else:
+            print(f"订阅已存在: {sub_id}")
         return 0
 
     if args.command == "list":
