@@ -16,6 +16,31 @@ from valveye.scheduler import PriceCheckScheduler
 from valveye.subscriptions import SubscriptionRepository
 
 
+def parse_channels_arg(raw_channels: str) -> list[dict]:
+    try:
+        parsed = json.loads(raw_channels)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"--channels 必须是合法 JSON：{exc}") from exc
+
+    if isinstance(parsed, dict):
+        parsed = [parsed]
+    if not isinstance(parsed, list):
+        raise ValueError("--channels 必须是 JSON 对象或 JSON 数组")
+
+    normalized: list[dict] = []
+    for i, item in enumerate(parsed):
+        if isinstance(item, str):
+            try:
+                item = json.loads(item)
+            except json.JSONDecodeError as exc:
+                raise ValueError(f"--channels 第 {i + 1} 项不是合法 JSON 对象字符串：{exc}") from exc
+        if not isinstance(item, dict):
+            raise ValueError(f"--channels 第 {i + 1} 项必须是 JSON 对象")
+        normalized.append(item)
+
+    return normalized
+
+
 def build_services():
     repo = SubscriptionRepository(db_path=settings.sqlite_path)
     sources = [ITADSource(), SteamDBSource(), CheapSharkSource()]
@@ -57,7 +82,11 @@ async def _run(args: argparse.Namespace) -> int:
         return 0
 
     if args.command == "subscribe":
-        channels = json.loads(args.channels)
+        try:
+            channels = parse_channels_arg(args.channels)
+        except ValueError as exc:
+            print(f"参数错误: {exc}")
+            return 2
         sub_id, created = repo.add(
             user_id=args.user,
             game_query=args.game,

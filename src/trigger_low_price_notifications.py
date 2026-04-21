@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 from dataclasses import dataclass
 
 from valveye.config import settings
@@ -11,6 +12,16 @@ from valveye.data_sources.steamdb import SteamDBSource
 from valveye.notifications import Notifier
 from valveye.pricing import PriceService
 from valveye.subscriptions import SubscriptionRepository
+
+
+def _normalize_channel(channel: dict | str) -> dict:
+    if isinstance(channel, dict):
+        return channel
+    if isinstance(channel, str):
+        parsed = json.loads(channel)
+        if isinstance(parsed, dict):
+            return parsed
+    raise ValueError("channel 必须为字典或可解析为字典的 JSON 字符串")
 
 
 @dataclass(slots=True)
@@ -105,7 +116,8 @@ async def notify_selected_subscriptions(spec: SelectionSpec) -> int:
 
         for channel in sub.channels:
             try:
-                await notifier.send(channel=channel, message=msg)
+                normalized_channel = _normalize_channel(channel)
+                await notifier.send(channel=normalized_channel, message=msg)
             except Exception as exc:  # noqa: BLE001
                 print(f"订阅 #{sub.id} 的通道发送失败：{exc}")
 

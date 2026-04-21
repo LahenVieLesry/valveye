@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -9,6 +10,16 @@ from valveye.notifications import Notifier
 from valveye.pricing import PriceService
 from valveye.subscriptions import SubscriptionRepository
 from valveye.time_utils import local_hhmm
+
+
+def _normalize_channel(channel: dict | str) -> dict:
+    if isinstance(channel, dict):
+        return channel
+    if isinstance(channel, str):
+        parsed = json.loads(channel)
+        if isinstance(parsed, dict):
+            return parsed
+    raise ValueError("channel 必须为字典或可解析为字典的 JSON 字符串")
 
 
 class PriceCheckScheduler:
@@ -70,7 +81,8 @@ class PriceCheckScheduler:
 
             for channel in sub.channels:
                 try:
-                    await self.notifier.send(channel=channel, message=msg)
+                    normalized_channel = _normalize_channel(channel)
+                    await self.notifier.send(channel=normalized_channel, message=msg)
                 except Exception:
                     # 通道失败不影响其他通道
                     continue
