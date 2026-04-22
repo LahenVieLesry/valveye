@@ -79,12 +79,15 @@ class PriceCheckScheduler:
                 f"口径: {sub.window}"
             )
 
+            success_channels = 0
             for channel in sub.channels:
                 try:
                     normalized_channel = _normalize_channel(channel)
                     await self.notifier.send(channel=normalized_channel, message=msg)
+                    success_channels += 1
                 except Exception:
                     # 通道失败不影响其他通道
                     continue
 
-            self.repo.mark_notified(sub.id, snapshot.historical_low)
+            if success_channels > 0:
+                self.repo.mark_notified(sub.id, snapshot.historical_low)

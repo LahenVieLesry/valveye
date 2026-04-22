@@ -40,6 +40,7 @@ class Settings:
     smtp_user: str = os.getenv("SMTP_USER", "")
     smtp_password: str = os.getenv("SMTP_PASSWORD", "")
     smtp_use_tls: bool = _as_bool(os.getenv("SMTP_USE_TLS"), True)
+    smtp_use_ssl: bool = _as_bool(os.getenv("SMTP_USE_SSL"), False)
     email_from: str = os.getenv("EMAIL_FROM", "")
 
     telegram_bot_token: str = os.getenv("TELEGRAM_BOT_TOKEN", "")

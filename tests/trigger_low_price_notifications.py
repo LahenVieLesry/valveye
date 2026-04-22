@@ -114,16 +114,22 @@ async def notify_selected_subscriptions(spec: SelectionSpec) -> int:
         tag = "新史低" if decision.is_new_low else "触及史低"
         msg = build_message(snapshot=snapshot, window=sub.window, tag=tag)
 
+        success_channels = 0
         for channel in sub.channels:
             try:
                 normalized_channel = _normalize_channel(channel)
                 await notifier.send(channel=normalized_channel, message=msg)
+                success_channels += 1
             except Exception as exc:  # noqa: BLE001
                 print(f"订阅 #{sub.id} 的通道发送失败：{exc}")
 
+        if success_channels == 0:
+            print(f"订阅 #{sub.id} 所有通道发送失败，未标记已通知。")
+            continue
+
         repo.mark_notified(sub.id, snapshot.historical_low)
         sent_count += 1
-        print(f"已发送订阅 #{sub.id}：{sub.user_id} / {sub.game_query}")
+        print(f"已发送订阅 #{sub.id}：{sub.user_id} / {sub.game_query}（成功通道 {success_channels}/{len(sub.channels)}）")
 
     return sent_count
 

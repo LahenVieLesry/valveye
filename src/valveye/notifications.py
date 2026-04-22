@@ -46,9 +46,14 @@ class Notifier:
         msg["To"] = to_addr
         msg.set_content(message)
 
-        with smtplib.SMTP(settings.smtp_host, settings.smtp_port, timeout=60) as smtp:
-            if settings.smtp_use_tls:
+        use_ssl = settings.smtp_use_ssl or (settings.smtp_port == 465 and not settings.smtp_use_tls)
+        smtp_factory = smtplib.SMTP_SSL if use_ssl else smtplib.SMTP
+
+        with smtp_factory(settings.smtp_host, settings.smtp_port, timeout=60) as smtp:
+            smtp.ehlo()
+            if not use_ssl and settings.smtp_use_tls:
                 smtp.starttls()
+                smtp.ehlo()
             if settings.smtp_user:
                 smtp.login(settings.smtp_user, settings.smtp_password)
             smtp.send_message(msg)
