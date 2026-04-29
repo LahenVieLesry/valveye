@@ -50,6 +50,8 @@ def build_services():
     notifier = Notifier()
     scheduler = PriceCheckScheduler(repo=repo, price_service=price_service, notifier=notifier)
     tools = build_tools(price_service=price_service, recommender=recommender, repo=repo)
+    # notifier.register_tools(tools)
+    
     return repo, price_service, recommender, scheduler, tools
 
 
