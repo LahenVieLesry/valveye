@@ -4,6 +4,7 @@ import argparse
 import asyncio
 import json
 
+from valveye.agent_executor import build_agent_executor
 from valveye.agent_tools import build_tools
 from valveye.config import settings
 from valveye.data_sources.cheapshark import CheapSharkSource
@@ -56,7 +57,7 @@ def build_services():
 
 
 async def _run(args: argparse.Namespace) -> int:
-    repo, price_service, recommender, scheduler, _tools = build_services()
+    repo, price_service, recommender, scheduler, tools = build_services()
 
     if args.command == "query":
         snapshot = await price_service.fetch_first_available(args.game, args.region, args.currency)
@@ -125,6 +126,14 @@ async def _run(args: argparse.Namespace) -> int:
         )
         return 0
 
+
+    if args.command == "agent":
+        executor = build_agent_executor(tools)
+        result = await executor.ainvoke({"input": args.message})
+        output = result.get("output", "")
+        print(output)
+        return 0
+
     if args.command == "check-once":
         await scheduler.run_once()
         print("已执行一次订阅价格检测")
@@ -166,6 +175,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     sub.add_parser("list", help="查看订阅")
+    a = sub.add_parser("agent", help="AgentExecutor 对话入口（单轮）")
+    a.add_argument("--message", required=True, help="用户消息")
+
     sub.add_parser("check-once", help="立即执行一次检测")
     sub.add_parser("scheduler", help="启动定时检测")
     return parser
