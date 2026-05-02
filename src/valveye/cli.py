@@ -3,7 +3,9 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import uuid
 
+from valveye.agent import build_agent_executor, run_single_turn, stream_turn
 from valveye.agent_tools import build_tools
 from valveye.config import settings
 from valveye.data_sources.cheapshark import CheapSharkSource
@@ -56,7 +58,7 @@ def build_services():
 
 
 async def _run(args: argparse.Namespace) -> int:
-    repo, price_service, recommender, scheduler, _tools = build_services()
+    repo, price_service, recommender, scheduler, tools = build_services()
 
     if args.command == "query":
         snapshot = await price_service.fetch_first_available(args.game, args.region, args.currency)
@@ -136,6 +138,34 @@ async def _run(args: argparse.Namespace) -> int:
         while True:
             await asyncio.sleep(3600)
 
+    if args.command == "chat":
+        agent = build_agent_executor(tools)
+        thread_id = str(uuid.uuid4())
+
+        if args.message:
+            reply = await run_single_turn(agent, args.message, thread_id)
+            print(reply)
+            return 0
+
+        print("Valveye AI 助手已启动，输入消息开始对话。输入 'quit' 或 'exit' 退出。")
+        print("-" * 60)
+        while True:
+            try:
+                user_input = input("You> ").strip()
+            except (EOFError, KeyboardInterrupt):
+                print("\n再见！")
+                break
+            if not user_input:
+                continue
+            if user_input.lower() in ("quit", "exit", "q"):
+                print("再见！")
+                break
+            print("Valveye> ", end="", flush=True)
+            async for chunk in stream_turn(agent, user_input, thread_id):
+                print(chunk, end="", flush=True)
+            print()
+        return 0
+
     return 1
 
 
@@ -168,6 +198,10 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("list", help="查看订阅")
     sub.add_parser("check-once", help="立即执行一次检测")
     sub.add_parser("scheduler", help="启动定时检测")
+
+    c = sub.add_parser("chat", help="与 AI 助手对话")
+    c.add_argument("--message", "-m", default=None, help="单次查询（不进入交互模式）")
+
     return parser
 
 
