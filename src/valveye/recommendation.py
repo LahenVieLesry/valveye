@@ -12,6 +12,7 @@ import certifi
 
 from valveye.config import settings
 from valveye.domain import RecommendationItem, RecommendationReason
+from valveye.pricing import resolve_game
 
 
 _YEAR_RE = re.compile(r"\b(19|20)\d{2}\b")
@@ -175,15 +176,22 @@ class Recommender:
         if not (game_query or "").strip():
             return []
 
+        # 先将任意语言的游戏名解析为英文名和 app_id
+        resolved = await resolve_game(game_query)
+        en_name = resolved.english_name if resolved else game_query
+        resolved_app_id = resolved.app_id if resolved else None
+
         timeout = aiohttp.ClientTimeout(total=self._timeout_sec)
         ssl_ctx = ssl.create_default_context(cafile=certifi.where())
         connector = aiohttp.TCPConnector(ssl=ssl_ctx)
         async with aiohttp.ClientSession(timeout=timeout, connector=connector) as session:
-            target = await self._resolve_target_profile(session=session, game_query=game_query)
+            target = await self._resolve_target_profile(
+                session=session, game_query=en_name, resolved_app_id=resolved_app_id,
+            )
             if target is None:
-                return await self._fallback_name_similarity(session=session, game_query=game_query, top_n=top_n)
+                return await self._fallback_name_similarity(session=session, game_query=en_name, top_n=top_n)
 
-            candidates = await self._collect_candidates(session=session, target=target, game_query=game_query)
+            candidates = await self._collect_candidates(session=session, target=target, game_query=en_name)
             if not candidates:
                 return []
 
@@ -191,12 +199,23 @@ class Recommender:
                 session=session,
                 target=target,
                 candidates=candidates,
-                game_query=game_query,
+                game_query=en_name,
                 top_n=top_n,
             )
             return [row.to_dict() for row in ranked]
 
-    async def _resolve_target_profile(self, session: aiohttp.ClientSession, game_query: str) -> _AppProfile | None:
+    async def _resolve_target_profile(
+        self,
+        session: aiohttp.ClientSession,
+        game_query: str,
+        resolved_app_id: int | None = None,
+    ) -> _AppProfile | None:
+        # 如果已有 app_id（来自 resolve_game），直接获取 profile
+        if resolved_app_id:
+            profile = await self._fetch_profile(session=session, app_id=resolved_app_id)
+            if profile:
+                return profile
+
         search_rows = await self._store_search(session=session, term=game_query, limit=8)
         if not search_rows:
             return None
