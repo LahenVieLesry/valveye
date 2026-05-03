@@ -1,29 +1,50 @@
-# Valveye
+<div align="center">
 
-> Steam 游戏价格 Agent — 查史低、跨区比价、推荐好游、订阅提醒，一句话搞定。
+# 🎮 Valveye
 
-基于 LangChain + LangGraph 构建的智能对话式 Steam 助手，支持多轮对话与流式输出，集成多个价格数据源，覆盖 23 个 Steam 区域。
+**Steam 游戏价格 Agent** — 查史低、跨区比价、推荐好游、订阅提醒，一句话搞定。
 
-## 功能一览
+<br/>
+
+![Python](https://img.shields.io/badge/Python-3.10+-3776AB?logo=python&logoColor=white)
+![LangChain](https://img.shields.io/badge/LangChain-1.2+-1C3C3C?logo=chainlink&logoColor=white)
+![LangGraph](https://img.shields.io/badge/LangGraph-1.1+-000000?logo=langchain&logoColor=white)
+![License](https://img.shields.io/badge/License-MIT-blue)
+![GitHub Stars](https://img.shields.io/github/stars/LahenVieLesry/valveye?style=social)
+![Last Commit](https://img.shields.io/github/last-commit/LahenVieLesry/valveye)
+
+<br/>
+
+基于 **LangChain + LangGraph** 构建的智能对话式 Steam 助手，支持多轮对话与流式输出，集成多个价格数据源，覆盖 **23 个 Steam 区域**。
+
+</div>
+
+---
+
+## 📖 功能一览
 
 | 能力 | 说明 |
-|------|------|
-| 对话式交互 | 基于 LangChain Agent + LangGraph，支持多轮记忆与流式输出 |
-| 史低价格查询 | IsThereAnyDeal / SteamDB / CheapShark 多源自动降级 |
-| 跨区价格对比 | 23 个 Steam 区域并发查询，自动汇率转换，按价格排序 |
-| 区域自动检测 | 输入语言 + 系统时区双重推断，无需手动指定区域/货币 |
-| 多语言游戏名 | 中文 / 日文 / 韩文 / 俄文等非英文名自动翻译为 Steam 官方英文名 |
-| 推荐相似游戏 | 基于标签、评测与相似产品智能推荐 |
-| 价格提醒订阅 | 史低 / 新史低触发，支持 7 种通知渠道 |
-| 定时检测 | 每日自动巡检订阅游戏价格变动 |
+|:-----|:-----|
+| 💬 对话式交互 | 基于 LangChain Agent + LangGraph，支持多轮记忆与流式输出 |
+| 📉 史低价格查询 | IsThereAnyDeal / SteamDB / CheapShark 多源自动降级 |
+| 🌍 跨区价格对比 | 23 个 Steam 区域并发查询，自动汇率转换，按价格排序 |
+| 🗺️ 区域自动检测 | 输入语言 + 系统时区双重推断，无需手动指定区域/货币 |
+| 🌐 多语言游戏名 | 中文 / 日文 / 韩文 / 俄文等非英文名自动翻译为 Steam 官方英文名 |
+| 🎯 推荐相似游戏 | 基于标签、评测与相似产品智能推荐 |
+| 🔔 价格提醒订阅 | 史低 / 新史低触发，支持 7 种通知渠道 |
+| ⏰ 定时检测 | 每日自动巡检订阅游戏价格变动 |
 
-### 通知渠道
+### 📬 通知渠道
 
-Email · Telegram · 企业微信 · 飞书 · 钉钉 · Discord · QQ
+`Email` · `Telegram` · `企业微信` · `飞书` · `钉钉` · `Discord` · `QQ`
 
-## 快速开始
+## 🚀 快速开始
 
 ```bash
+# 克隆项目
+git clone https://github.com/LahenVieLesry/valveye.git
+cd valveye
+
 # 安装依赖
 pip install -r requirements.txt
 
@@ -32,7 +53,7 @@ cp .env.example .env
 # 编辑 .env 填入 OpenAI API Key 等配置
 ```
 
-### 对话模式
+### 💬 对话模式
 
 ```bash
 # 交互式对话
@@ -48,17 +69,17 @@ python src/main.py chat -m "Persona 5 哪个区最便宜"
 python src/main.py chat -m "ファタモルガーナの館の価格は？"
 ```
 
-## 工具列表
+## 🛠️ 工具列表
 
 | 工具 | 功能 | 示例触发 |
-|------|------|----------|
+|:-----|:-----|:---------|
 | `query_low_price` | 查询当前价与史低 | "赛博朋克 2077 多少钱" |
 | `compare_prices` | 全区域跨区比价 | "艾尔登法环哪个区最便宜" |
 | `recommend_similar_games` | 推荐同类游戏 | "推荐几个像空洞骑士的游戏" |
 | `subscribe_game` | 订阅价格提醒 | "Persona 5 史低时通知我" |
 | `list_subscriptions` | 查看有效订阅 | "我有哪些订阅" |
 
-## 区域支持
+## 🌍 区域支持
 
 自动检测覆盖 23 个 Steam 区域：
 
@@ -73,9 +94,31 @@ python src/main.py chat -m "ファタモルガーナの館の価格は？"
 | 土区 | TRY | 乌区 | UAH | 哈区 | KZT |
 | 南非区 | ZAR | 阿联酋区 | AED | | |
 
-**检测优先级**：非拉丁文字直接匹配 → 系统语言 / 时区推断 → 美区兜底
+> **检测优先级**：非拉丁文字直接匹配 → 系统语言 / 时区推断 → 美区兜底
 
-## 项目结构
+## 📸 效果展示
+
+<details>
+<summary>点击展开截图</summary>
+
+<br/>
+
+**跨区比价与区域自动检测**
+
+<img src="img/语言区域货币自动切换.png" width="600">
+
+**游戏推荐**
+
+<img src="img/游戏推荐1.png" width="600">
+<img src="img/游戏推荐2.png" width="600">
+
+**价格提醒邮件通知**
+
+<img src="img/提醒email.png" width="600">
+
+</details>
+
+## 📁 项目结构
 
 ```
 src/valveye/
@@ -97,7 +140,7 @@ src/valveye/
     └── cheapshark.py  # CheapShark
 ```
 
-## TODO
+## 📋 TODO
 
 - [ ] 补充测试用例
 - [ ] 通知去重 + 重试退避 + 失败落盘
@@ -105,8 +148,21 @@ src/valveye/
 
 ---
 
+<div align="center">
+
+### 📊 项目面板
+
+![Repo Size](https://img.shields.io/github/repo-size/LahenVieLesry/valveye)
+![GitHub Issues](https://img.shields.io/github/issues/LahenVieLesry/valveye)
+![GitHub Pull Requests](https://img.shields.io/github/issues-pr/LahenVieLesry/valveye)
+![GitHub Forks](https://img.shields.io/github/forks/LahenVieLesry/valveye?style=social)
+
+</div>
+
+## 🙏 致谢
+
 <details>
-<summary>致谢</summary>
+<summary>点击展开</summary>
 
 本项目的成长离不开两段"算力接力"。
 
