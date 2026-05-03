@@ -157,6 +157,12 @@ src/valveye/
 ![GitHub Pull Requests](https://img.shields.io/github/issues-pr/LahenVieLesry/valveye)
 ![GitHub Forks](https://img.shields.io/github/forks/LahenVieLesry/valveye?style=social)
 
+<br/>
+
+**📅 更新日历**
+
+<img src="img/contribution-calendar.svg" alt="Contribution Calendar" width="700">
+
 </div>
 
 ## 🙏 致谢
