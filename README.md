@@ -161,7 +161,7 @@ src/valveye/
 
 **📅 更新日历**
 
-<img src="img/contribution-calendar.svg" alt="Contribution Calendar" width="700">
+<img src="img/contribution-calendar.svg" alt="Contribution Calendar">
 
 </div>
 

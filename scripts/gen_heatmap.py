@@ -1,24 +1,35 @@
 #!/usr/bin/env python3
-"""Generate a GitHub-style contribution calendar heatmap SVG from git log."""
+"""Generate a GitHub-style contribution calendar heatmap SVG from git log.
+Supports light/dark mode via prefers-color-scheme, and only shows dates
+from the project's first commit onwards."""
 
 import subprocess
 import datetime
 
 # ── Config ──────────────────────────────────────────────────────────────────
-CELL = 11          # cell size in px
-GAP = 2            # gap between cells
-CORNER = 2         # border radius
-LEFT_PAD = 32      # space for month labels
-TOP_PAD = 16       # space for day labels
-COLORS = ["#ebedf0", "#9be9a8", "#40c463", "#30a14e", "#216e39"]
+CELL = 13
+GAP = 3
+CORNER = 2
+LEFT_PAD = 38
+TOP_PAD = 22
+
+# Light mode colors
+LIGHT_EMPTY = "#ebedf0"
+LIGHT = ["#9be9a8", "#40c463", "#30a14e", "#216e39"]
+LIGHT_TEXT = "#656d76"
+
+# Dark mode colors
+DARK_EMPTY = "#2d333b"
+DARK = ["#0e4429", "#006d32", "#26a641", "#39d353"]
+DARK_TEXT = "#8b949e"
+
 OUT_FILE = "img/contribution-calendar.svg"
 # ────────────────────────────────────────────────────────────────────────────
 
 def get_commit_map():
-    """Return {date_str: count} for the last 365 days."""
-    since = (datetime.date.today() - datetime.timedelta(days=364)).isoformat()
+    """Return {date_str: count} for all commits."""
     result = subprocess.run(
-        ["git", "log", "--format=%ad", "--date=format:%Y-%m-%d", f"--since={since}"],
+        ["git", "log", "--format=%ad", "--date=format:%Y-%m-%d"],
         capture_output=True, text=True
     )
     counts = {}
@@ -27,85 +38,112 @@ def get_commit_map():
             counts[line] = counts.get(line, 0) + 1
     return counts
 
+def get_first_commit_date():
+    """Return the date of the earliest commit."""
+    result = subprocess.run(
+        ["git", "log", "--reverse", "--format=%ad", "--date=format:%Y-%m-%d"],
+        capture_output=True, text=True
+    )
+    first = result.stdout.strip().splitlines()[0]
+    return datetime.date.fromisoformat(first)
+
 def level(count):
-    """Map commit count to color level 0-4."""
-    if count <= 0:  return 0
-    if count <= 2:  return 1
-    if count <= 4:  return 2
-    if count <= 6:  return 3
-    return 4
+    if count <= 0:  return -1
+    if count <= 2:  return 0
+    if count <= 4:  return 1
+    if count <= 6:  return 2
+    return 3
 
 def main():
     counts = get_commit_map()
+    first_date = get_first_commit_date()
     today = datetime.date.today()
-    # Find the Sunday of the current week
-    end = today + datetime.timedelta(days=(6 - today.weekday()) % 7)
-    start = end - datetime.timedelta(days=364)
-    # Adjust to start on Sunday
-    start = start - datetime.timedelta(days=start.weekday() + 1) if start.weekday() != 6 else start
 
-    # Build week columns
+    # Start from Sunday of the first commit's week
+    start = first_date - datetime.timedelta(days=(first_date.weekday() + 1) % 7)
+    # End on Saturday of the current week
+    end = today + datetime.timedelta(days=(6 - today.weekday()) % 7)
+
     weeks = []
     current = start
     while current <= end:
         week = []
         for d in range(7):
             day = current + datetime.timedelta(days=d)
-            if day <= end:
-                week.append(day)
-        if week:
-            weeks.append(week)
+            week.append(day if first_date <= day <= end else None)
+        weeks.append(week)
         current += datetime.timedelta(days=7)
 
     num_weeks = len(weeks)
     svg_w = LEFT_PAD + num_weeks * (CELL + GAP) + 8
-    svg_h = TOP_PAD + 7 * (CELL + GAP) + 8
+    svg_h = TOP_PAD + 7 * (CELL + GAP) + 10
 
     # Month labels
     months = []
     last_month = -1
     for wi, week in enumerate(weeks):
-        m = week[0].month
-        if m != last_month:
-            months.append((wi, ["Jan","Feb","Mar","Apr","May","Jun",
-                                "Jul","Aug","Sep","Oct","Nov","Dec"][m-1]))
-            last_month = m
+        for day in week:
+            if day and day >= first_date:
+                m = day.month
+                if m != last_month:
+                    months.append((wi, ["Jan","Feb","Mar","Apr","May","Jun",
+                                        "Jul","Aug","Sep","Oct","Nov","Dec"][m-1]))
+                    last_month = m
+                break
 
-    day_labels = ["", "Mon", "", "Wed", "", "Fri", ""]
+    day_labels = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]
 
-    lines = []
-    lines.append(f'<svg xmlns="http://www.w3.org/2000/svg" width="{svg_w}" height="{svg_h}" '
-                 f'style="font-family:-apple-system,BlinkMacSystemFont,Segoe UI,Helvetica,Arial,sans-serif;font-size:10px">')
-    lines.append(f'<style>text{{fill:#656d76}}</style>')
+    out = []
+    out.append('<svg xmlns="http://www.w3.org/2000/svg" width="' + str(svg_w) + '" height="' + str(svg_h) + '">')
+
+    # CSS with dark/light mode
+    out.append('<style>')
+    out.append("  text { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif; font-size: 11px }")
+    out.append('  .label { fill: ' + LIGHT_TEXT + ' }')
+    out.append('  .empty { fill: ' + LIGHT_EMPTY + ' }')
+    for i in range(4):
+        out.append('  .l' + str(i) + ' { fill: ' + LIGHT[i] + ' }')
+    out.append('  @media (prefers-color-scheme: dark) {')
+    out.append('    .label { fill: ' + DARK_TEXT + ' }')
+    out.append('    .empty { fill: ' + DARK_EMPTY + ' }')
+    for i in range(4):
+        out.append('    .l' + str(i) + ' { fill: ' + DARK[i] + ' }')
+    out.append('  }')
+    out.append('</style>')
 
     # Month labels
     for wi, name in months:
         x = LEFT_PAD + wi * (CELL + GAP)
-        lines.append(f'<text x="{x}" y="10">{name}</text>')
+        out.append('<text class="label" x="' + str(x) + '" y="14">' + name + '</text>')
 
-    # Day labels
+    # Day labels (Mon, Wed, Fri)
     for di, label in enumerate(day_labels):
-        if label:
-            y = TOP_PAD + di * (CELL + GAP) + CELL - 1
-            lines.append(f'<text x="0" y="{y}">{label}</text>')
+        if di % 2 == 1:
+            y = TOP_PAD + di * (CELL + GAP) + CELL - 2
+            out.append('<text class="label" x="0" y="' + str(y) + '">' + label + '</text>')
 
     # Cells
     for wi, week in enumerate(weeks):
         for di, day in enumerate(week):
-            key = day.isoformat()
-            cnt = counts.get(key, 0)
-            color = COLORS[level(cnt)]
+            if day is None or day < first_date:
+                continue
             x = LEFT_PAD + wi * (CELL + GAP)
             y = TOP_PAD + di * (CELL + GAP)
-            tooltip = f"{day.strftime('%b %d, %Y')}: {cnt} commit{'s' if cnt != 1 else ''}"
-            lines.append(f'<rect x="{x}" y="{y}" width="{CELL}" height="{CELL}" rx="{CORNER}" ry="{CORNER}" '
-                         f'fill="{color}"><title>{tooltip}</title></rect>')
+            cnt = counts.get(day.isoformat(), 0)
+            lvl = level(cnt)
+            cls = "empty" if lvl < 0 else "l" + str(lvl)
+            s = "s" if cnt != 1 else ""
+            tip = day.strftime("%b %d, %Y") + ": " + str(cnt) + " commit" + s
+            out.append('<rect class="' + cls + '" x="' + str(x) + '" y="' + str(y) + '" '
+                       'width="' + str(CELL) + '" height="' + str(CELL) + '" '
+                       'rx="' + str(CORNER) + '" ry="' + str(CORNER) + '">'
+                       '<title>' + tip + '</title></rect>')
 
-    lines.append("</svg>")
+    out.append('</svg>')
 
     with open(OUT_FILE, "w") as f:
-        f.write("\n".join(lines))
-    print(f"Generated {OUT_FILE} ({num_weeks} weeks)")
+        f.write("\n".join(out))
+    print("Generated " + OUT_FILE + " (" + str(num_weeks) + " weeks, from " + str(first_date) + " to " + str(today) + ")")
 
 if __name__ == "__main__":
     main()
