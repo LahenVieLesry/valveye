@@ -7,4 +7,6 @@ langgraph==1.1.8
 langgraph-prebuilt==1.0.10
 python-dotenv==1.2.2
 pydantic==2.12.5
+prompt_toolkit>=3.0
 pytest==8.4.2
+rich>=13.0

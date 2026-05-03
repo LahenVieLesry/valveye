@@ -4,12 +4,13 @@ import json
 
 from langchain_core.tools import tool
 
+from valveye.game_data import GameDataService
 from valveye.pricing import PriceService, _detect_region, fetch_all_regions
 from valveye.recommendation import Recommender
 from valveye.subscriptions import SubscriptionRepository
 
 
-def build_tools(price_service: PriceService, recommender: Recommender, repo: SubscriptionRepository):
+def build_tools(price_service: PriceService, recommender: Recommender, game_data: GameDataService, repo: SubscriptionRepository):
     @tool
     async def query_low_price(game: str, user_query: str = "", region: str = "", currency: str = "", window: str = "all") -> str:
         """查询某游戏当前价与史低信息，window 支持 all/12m/3m。game 参数必须为 Steam 官方英文名。
@@ -60,6 +61,85 @@ def build_tools(price_service: PriceService, recommender: Recommender, repo: Sub
         return json.dumps(result, ensure_ascii=False)
 
     @tool
+    async def search_similar_candidates(game: str, top_n: int = 15) -> str:
+        """搜索与指定游戏相似的候选游戏列表（轻量级，不含详细描述）。
+        返回标题、标签、差评率和来源信号。用于先发现候选，再用 get_game_details 深入调查。
+        game 参数必须为 Steam 官方英文名。"""
+        result = await recommender.search_candidates(game_query=game, top_n=top_n)
+        if not result:
+            return "未找到相似候选，请检查游戏名称。"
+        return json.dumps(result, ensure_ascii=False)
+
+    @tool
+    async def get_game_details(game: str) -> str:
+        """获取单个游戏的详细信息：描述、加权标签（社区投票权重）、类型、评价统计。
+        用于深入分析某个候选游戏是否真正适合推荐。game 参数必须为 Steam 官方英文名。"""
+        en_name, app_id = await game_data.resolve_game(game)
+        if not app_id:
+            # Try search fallback
+            rows = await game_data.search(term=en_name, limit=1)
+            if rows:
+                try:
+                    app_id = int(rows[0].get("id"))
+                except (TypeError, ValueError):
+                    return f"未找到游戏：{game}"
+            else:
+                return f"未找到游戏：{game}"
+
+        profile = await game_data.fetch_profile(app_id=app_id)
+        if not profile:
+            return f"无法获取游戏详情：{game}"
+
+        return json.dumps({
+            "title": profile.title,
+            "app_id": profile.app_id,
+            "developer": profile.developer,
+            "publisher": profile.publisher,
+            "release_date": profile.release_date,
+            "platforms": profile.platforms,
+            "genres": profile.relevance_tags,
+            "description": profile.description,
+            "detailed_description": profile.detailed_description[:2000] if profile.detailed_description else "",
+            "website": profile.website,
+            "metacritic_score": profile.metacritic_score,
+            "tags_weighted": dict(list(profile.tags_weighted.items())[:15]),
+            "positive_count": profile.positive_count,
+            "negative_count": profile.negative_count,
+            "negative_ratio": round(profile.negative_ratio, 4) if profile.negative_ratio is not None else None,
+            "thumb": profile.thumb,
+        }, ensure_ascii=False)
+
+    @tool
+    async def get_game_reviews(game: str, review_type: str = "negative", count: int = 3) -> str:
+        """获取游戏玩家评论片段。review_type 可选 'negative'（差评）或 'positive'（好评）。
+        用于了解玩家真实体验，辅助推荐决策。game 参数必须为 Steam 官方英文名。"""
+        if review_type not in ("negative", "positive"):
+            review_type = "negative"
+
+        en_name, app_id = await game_data.resolve_game(game)
+        if not app_id:
+            rows = await game_data.search(term=en_name, limit=1)
+            if rows:
+                try:
+                    app_id = int(rows[0].get("id"))
+                except (TypeError, ValueError):
+                    return f"未找到游戏：{game}"
+            else:
+                return f"未找到游戏：{game}"
+
+        reviews = await game_data.fetch_reviews(app_id=app_id, review_type=review_type, count=count)
+        label = "差评" if review_type == "negative" else "好评"
+        if not reviews:
+            return f"暂无{label}样本：{game}"
+
+        return json.dumps({
+            "game": en_name,
+            "review_type": review_type,
+            "label": label,
+            "reviews": reviews,
+        }, ensure_ascii=False)
+
+    @tool
     def subscribe_game(
         user_id: str,
         game: str,
@@ -104,4 +184,4 @@ def build_tools(price_service: PriceService, recommender: Recommender, repo: Sub
         ]
         return json.dumps(payload, ensure_ascii=False)
 
-    return [query_low_price, compare_prices, recommend_similar_games, subscribe_game, list_subscriptions]
+    return [query_low_price, compare_prices, search_similar_candidates, get_game_details, get_game_reviews, recommend_similar_games, subscribe_game, list_subscriptions]

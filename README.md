@@ -25,7 +25,7 @@
 
 | 能力 | 说明 |
 |:-----|:-----|
-| 💬 对话式交互 | 基于 LangChain Agent + LangGraph，支持多轮记忆与流式输出 |
+| 💬 对话式交互 | 基于 LangChain Agent + LangGraph，支持多轮记忆与流式输出，现代 CLI 界面 |
 | 📉 史低价格查询 | IsThereAnyDeal / SteamDB / CheapShark 多源自动降级 |
 | 🌍 跨区价格对比 | 23 个 Steam 区域并发查询，自动汇率转换，按价格排序 |
 | 🗺️ 区域自动检测 | 输入语言 + 系统时区双重推断，无需手动指定区域/货币 |
@@ -56,7 +56,7 @@ cp .env.example .env
 ### 💬 对话模式
 
 ```bash
-# 交互式对话
+# 交互式对话（带斜杠命令补全、思考过程折叠、Markdown 渲染）
 python src/main.py chat
 
 # 单次查询
@@ -68,6 +68,28 @@ python src/main.py chat -m "Persona 5 哪个区最便宜"
 # 日文输入，自动识别日区
 python src/main.py chat -m "ファタモルガーナの館の価格は？"
 ```
+
+**交互式 CLI 功能：**
+
+| 功能 | 说明 |
+|:-----|:-----|
+| `/` 斜杠命令 | 输入 `/` 自动补全，快速执行常用操作 |
+| 💭 思考折叠 | Agent 推理过程实时流式显示，完成后可折叠/展开（按 `T` 切换） |
+| Markdown 渲染 | AI 回复支持粗体、列表、代码块等富文本格式 |
+| 命令历史 | 上下箭头浏览历史输入 |
+
+**可用斜杠命令：**
+
+| 命令 | 说明 |
+|:-----|:-----|
+| `/query <游戏名>` | 快速查询游戏价格 |
+| `/recommend <游戏名>` | 推荐相似游戏 |
+| `/subscribe <游戏名>` | 订阅价格提醒 |
+| `/list` | 查看当前订阅列表 |
+| `/help` | 显示帮助信息 |
+| `/model` | 显示当前模型信息 |
+| `/clear` | 清屏 |
+| `/quit` | 退出对话 |
 
 ## 🛠️ 工具列表
 
@@ -127,6 +149,7 @@ src/valveye/
 ├── cli.py             # CLI 入口（chat / subscribe / check）
 ├── config.py          # 配置管理
 ├── domain.py          # 领域模型
+├── game_data.py       # Steam 游戏数据服务（详情、评测、搜索）
 ├── notifications.py   # 多渠道通知（7 种渠道）
 ├── pricing.py         # 价格查询、区域检测、汇率转换
 ├── recommendation.py  # 游戏推荐引擎

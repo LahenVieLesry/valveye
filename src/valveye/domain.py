@@ -38,6 +38,28 @@ class Subscription:
 
 
 @dataclass(slots=True)
+class GameProfile:
+    app_id: int
+    title: str
+    app_type: str
+    tags: list[str] = field(default_factory=list)
+    relevance_tags: list[str] = field(default_factory=list)
+    tags_weighted: dict[str, int] = field(default_factory=dict)
+    description: str = ""
+    detailed_description: str = ""
+    developer: str = ""
+    publisher: str = ""
+    release_date: str = ""
+    platforms: dict[str, bool] = field(default_factory=dict)
+    website: str = ""
+    metacritic_score: int | None = None
+    thumb: str | None = None
+    negative_ratio: float | None = None
+    positive_count: int = 0
+    negative_count: int = 0
+
+
+@dataclass(slots=True)
 class RecommendationReason:
     tag_overlap: list[str] = field(default_factory=list)
     matched_signals: list[str] = field(default_factory=list)
