@@ -11,6 +11,7 @@ import certifi
 from valveye.config import settings
 from valveye.domain import GameProfile
 from valveye.pricing import resolve_game
+from valveye.retry import async_retry
 
 _MORE_LIKE_APP_RE = re.compile(r"/app/(\d+)")
 _SPACE_RE = re.compile(r"\s+")
@@ -176,6 +177,24 @@ class GameDataService:
                 break
         return snippets
 
+    @async_retry(max_attempts=2, base_delay=1.0, exceptions=(aiohttp.ClientError, asyncio.TimeoutError))
+    async def _fetch_appdetails_with_retry(self, app_id: int) -> dict | None:
+        """Fetch appdetails with retry. Lets network errors propagate for the retry decorator."""
+        session = await self._get_session()
+        url = f"{settings.steam_store_base_url.rstrip('/')}/api/appdetails"
+        async with session.get(url, params={"appids": app_id, "l": "english", "cc": "us"}) as resp:
+            if resp.status >= 400:
+                return None
+            payload = await resp.json()
+
+        root = payload.get(str(app_id)) if isinstance(payload, dict) else None
+        if not isinstance(root, dict):
+            return None
+        if root.get("success") is not True:
+            return None
+        data = root.get("data")
+        return data if isinstance(data, dict) else None
+
     async def fetch_profile(self, app_id: int) -> GameProfile | None:
         """Fetch full game profile, with caching."""
         cached = self._cache.get(app_id)
@@ -183,7 +202,10 @@ class GameDataService:
             self._cache.move_to_end(app_id)
             return cached
 
-        details = await self.fetch_appdetails(app_id)
+        try:
+            details = await self._fetch_appdetails_with_retry(app_id)
+        except (aiohttp.ClientError, asyncio.TimeoutError):
+            return None
         if not details:
             return None
 

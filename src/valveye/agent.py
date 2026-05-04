@@ -94,12 +94,12 @@ SYSTEM_PROMPT = (
     "**第二步：获取候选**\n"
     "调用 search_similar_candidates 获取候选列表。快速浏览标签和来源信号。\n"
     "\n"
-    "**第三步：深度调查（选择 3-5 个最有潜力的候选）**\n"
+    "**第三步：深度调查（最多 3 个最有潜力的候选）**\n"
     "对每个你认为最匹配的候选：\n"
     "1. 调用 get_game_details 获取详细信息\n"
     "2. 重点阅读 description（游戏描述比标签更能说明游戏本质）\n"
     "3. 查看 tags_weighted（社区认为这个游戏\"是什么\"，投票数越高越能代表游戏特色）\n"
-    "4. 可选：调用 get_game_reviews 了解玩家真实体验（正面或差评均可）\n"
+    "4. 仅在需要了解玩家真实体验时调用 get_game_reviews（非必须步骤）\n"
     "\n"
     "**第四步：综合推理**\n"
     "不要只比较标签。考虑：\n"
@@ -122,6 +122,14 @@ SYSTEM_PROMPT = (
     "   如果有差评中反映的问题，也可以在此提及作为参考。\n"
     "\n"
     "最后如果有价格信息，可以一并给出购买建议。"
+    "\n\n"
+    "## 效率规则\n"
+    "\n"
+    "- **简单查询一次调用**：查价格只需 query_low_price，查游戏信息只需 get_game_details，不要多此一举。\n"
+    "- **找到就用**：一旦通过工具获得了游戏的英文名和数据，直接使用，不要重复搜索或再次确认。\n"
+    "- **不确定就问**：如果用户给出的游戏名模糊且搜索返回多个候选项，直接列出候选项让用户选择，不要猜测。\n"
+    "- **推荐流程精简**：推荐相似游戏时，search_similar_candidates 后最多深入调查 3 个候选，get_game_reviews 仅在需要了解玩家体验时调用（非必须）。整个推荐流程工具调用总计不超过 5 次。\n"
+    "- **不要重复调用同一个工具**：如果已经查过某游戏的价格或详情，不要再查一次。"
 )
 
 
@@ -148,7 +156,7 @@ def build_agent_executor(tools: list):
 
 
 async def run_single_turn(agent, message: str, thread_id: str) -> str:
-    config = {"configurable": {"thread_id": thread_id}}
+    config = {"configurable": {"thread_id": thread_id}, "recursion_limit": 10}
     result = await agent.ainvoke(
         {"messages": [HumanMessage(content=message)]},
         config=config,
@@ -161,16 +169,39 @@ async def run_single_turn(agent, message: str, thread_id: str) -> str:
 
 
 async def stream_turn(agent, message: str, thread_id: str) -> AsyncIterator[str]:
-    config = {"configurable": {"thread_id": thread_id}}
-    async for event in agent.astream(
+    config = {"configurable": {"thread_id": thread_id}, "recursion_limit": 10}
+    async for event in agent.astream_events(
         {"messages": [HumanMessage(content=message)]},
         config=config,
-        stream_mode="messages",
+        version="v2",
     ):
-        msg, _metadata = event  # noqa: F841
-        if isinstance(msg, AIMessage) and msg.content:
-            content: Any = msg.content
-            yield content if isinstance(content, str) else str(content)
-        elif hasattr(msg, "tool_calls") and msg.tool_calls:
-            for tc in msg.tool_calls:
-                yield f"\n[调用工具: {tc['name']}({tc['args']})]\n"
+        kind = event.get("event")
+        if kind == "on_chat_model_stream":
+            chunk = event["data"]["chunk"]
+            if chunk.content:
+                yield chunk.content if isinstance(chunk.content, str) else str(chunk.content)
+        elif kind == "on_tool_start":
+            name = event.get("name", "unknown")
+            inputs = event.get("data", {}).get("input", {})
+            # Build a compact summary: extract key params only
+            game = inputs.get("game", "")
+            if game:
+                summary = game
+            elif name == "list_subscriptions":
+                summary = ""
+            else:
+                summary = ", ".join(f"{k}={v}" for k, v in inputs.items() if v and k != "user_query")
+            yield f"\n[调用工具: {name}({summary})]\n"
+        elif kind == "on_tool_end":
+            output_obj = event.get("data", {}).get("output", "")
+            # Extract clean content from ToolMessage objects
+            if hasattr(output_obj, "content"):
+                output = str(output_obj.content)
+            else:
+                output = str(output_obj)
+            if len(output) > 500:
+                output = output[:500] + "..."
+            yield f"\n[工具结果: {output}]\n"
+        elif kind == "on_tool_error":
+            error = str(event.get("data", {}).get("error", "unknown error"))
+            yield f"\n[工具错误: {error}]\n"

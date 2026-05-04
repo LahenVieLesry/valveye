@@ -53,5 +53,14 @@ class Settings:
 
     sqlite_path: str = os.getenv("SQLITE_PATH", "valveye.db")
 
+    def validate(self) -> list[str]:
+        """检查关键配置项，返回缺失或异常的警告列表。"""
+        warnings: list[str] = []
+        if not self.openai_api_key:
+            warnings.append("OPENAI_API_KEY 未设置，AI 对话功能将不可用")
+        if not self.itad_api_key:
+            warnings.append("ITAD_API_KEY 未设置，价格查询将降级为 CheapShark 单源")
+        return warnings
+
 
 settings = Settings()

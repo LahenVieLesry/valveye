@@ -77,6 +77,8 @@ python src/main.py chat -m "ファタモルガーナの館の価格は？"
 | 💭 思考折叠 | Agent 推理过程实时流式显示，完成后可折叠/展开（按 `T` 切换） |
 | Markdown 渲染 | AI 回复支持粗体、列表、代码块等富文本格式 |
 | 命令历史 | 上下箭头浏览历史输入 |
+| 对话管理 | 双击 `Esc` 切换对话，`/resume` 恢复历史，`/new` 新建 |
+| 对话导出 | `/export` 导出为 Markdown / JSON / HTML，Copilot 风格折叠格式 |
 
 **可用斜杠命令：**
 
@@ -86,10 +88,15 @@ python src/main.py chat -m "ファタモルガーナの館の価格は？"
 | `/recommend <游戏名>` | 推荐相似游戏 |
 | `/subscribe <游戏名>` | 订阅价格提醒 |
 | `/list` | 查看当前订阅列表 |
+| `/export [md\|json\|html]` | 导出当前对话（Copilot 风格折叠格式） |
+| `/resume` | 恢复历史对话 |
+| `/new` | 开始新对话 |
 | `/help` | 显示帮助信息 |
 | `/model` | 显示当前模型信息 |
 | `/clear` | 清屏 |
 | `/quit` | 退出对话 |
+
+> **对话切换**：连按两次 `Esc` 打开对话切换菜单，支持方向键和数字快捷选择。
 
 ## 🛠️ 工具列表
 
@@ -146,6 +153,7 @@ python src/main.py chat -m "ファタモルガーナの館の価格は？"
 src/valveye/
 ├── agent.py           # LangChain Agent 构建与对话入口
 ├── agent_tools.py     # Agent 工具定义
+├── chat_store.py      # 对话持久化与多格式导出（md/json/html）
 ├── cli.py             # CLI 入口（chat / subscribe / check）
 ├── config.py          # 配置管理
 ├── domain.py          # 领域模型
@@ -153,6 +161,7 @@ src/valveye/
 ├── notifications.py   # 多渠道通知（7 种渠道）
 ├── pricing.py         # 价格查询、区域检测、汇率转换
 ├── recommendation.py  # 游戏推荐引擎
+├── retry.py           # 异步重试装饰器（指数退避）
 ├── scheduler.py       # APScheduler 定时任务
 ├── subscriptions.py   # SQLite 订阅存储
 ├── time_utils.py      # 时区工具

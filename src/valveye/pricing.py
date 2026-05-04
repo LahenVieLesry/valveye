@@ -12,6 +12,7 @@ import certifi
 from valveye.config import settings
 from valveye.data_sources.base import PriceSource
 from valveye.domain import PriceSnapshot
+from valveye.retry import async_retry
 
 
 @dataclass(slots=True)
@@ -136,32 +137,49 @@ def _detect_system_region() -> tuple[str, str] | None:
 def _detect_region(query: str) -> tuple[str, str]:
     """根据输入文本的字符特征和系统环境，返回默认的 (region, currency)。
 
-    优先级：文本字符检测（非拉丁文字） > 系统语言/时区检测 > 美区兜底
+    优先级：专属文字（假名/韩文） > 系统语言/时区检测 > CJK 汉字（需系统环境辅助） > 美区兜底
+    注意：CJK 统一表意文字（汉字）同时被中日韩使用，不能直接判定为国区。
     """
-    # 1. 字符特征检测（非拉丁文字可明确关联区域）
+    has_kana = False
+    has_hangul = False
+    has_cjk = False
+
     for ch in query:
         cp = ord(ch)
+        # 假名 → 日区（专属字符，无歧义）
         if (0x3040 <= cp <= 0x30FF) or (0x31F0 <= cp <= 0x31FF):
-            return "JP", "JPY"
-        if 0xAC00 <= cp <= 0xD7AF or 0x1100 <= cp <= 0x11FF:
-            return "KR", "KRW"
-        if (0x4E00 <= cp <= 0x9FFF) or (0x3400 <= cp <= 0x4DBF) or (0xF900 <= cp <= 0xFAFF):
-            return "CN", "CNY"
-        if 0x0400 <= cp <= 0x04FF:
+            has_kana = True
+        # 韩文 → 韩区（专属字符，无歧义）
+        elif 0xAC00 <= cp <= 0xD7AF or 0x1100 <= cp <= 0x11FF:
+            has_hangul = True
+        # CJK 汉字 → 中日韩共用，不能直接判定
+        elif (0x4E00 <= cp <= 0x9FFF) or (0x3400 <= cp <= 0x4DBF) or (0xF900 <= cp <= 0xFAFF):
+            has_cjk = True
+        elif 0x0400 <= cp <= 0x04FF:
             return "RU", "RUB"
-        if 0x0600 <= cp <= 0x06FF:
+        elif 0x0600 <= cp <= 0x06FF:
             return "AE", "AED"
-        if 0x0E00 <= cp <= 0x0E7F:
+        elif 0x0E00 <= cp <= 0x0E7F:
             return "SG", "SGD"
-        if 0x0900 <= cp <= 0x097F:
+        elif 0x0900 <= cp <= 0x097F:
             return "IN", "INR"
 
-    # 2. 拉丁文字无法从文本判断区域，检查系统环境
+    # 专属文字判定（无歧义）
+    if has_kana:
+        return "JP", "JPY"
+    if has_hangul:
+        return "KR", "KRW"
+
+    # 系统环境检测（对拉丁文字和纯汉字均有效）
     system_region = _detect_system_region()
     if system_region:
         return system_region
 
-    # 3. 兜底
+    # 纯汉字且无法从系统环境判断 → 兜底国区
+    if has_cjk:
+        return "CN", "CNY"
+
+    # 兜底
     return "US", "USD"
 
 
@@ -236,56 +254,68 @@ def _search_locales(query: str) -> list[tuple[str, str]]:
     return unique
 
 
-async def resolve_game(game_query: str) -> ResolvedGame | None:
+def _make_session(timeout_sec: float = 12) -> aiohttp.ClientSession:
+    ssl_ctx = ssl.create_default_context(cafile=certifi.where())
+    connector = aiohttp.TCPConnector(ssl=ssl_ctx)
+    return aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=timeout_sec), connector=connector)
+
+
+async def resolve_game(
+    game_query: str, *, session: aiohttp.ClientSession | None = None,
+) -> ResolvedGame | None:
     """将任意语言的游戏名解析为英文标准名。
 
     流程：检测语言 → 按优先级尝试多个 locale 搜索 Steam → 用 appdetails(l=english) 取英文名。
     """
     candidates = _search_locales(game_query)
-    timeout = aiohttp.ClientTimeout(total=12)
-    ssl_ctx = ssl.create_default_context(cafile=certifi.where())
-    connector = aiohttp.TCPConnector(ssl=ssl_ctx)
     base = settings.steam_store_base_url.rstrip("/")
+    owns_session = session is None
 
     try:
-        async with aiohttp.ClientSession(timeout=timeout, connector=connector) as session:
-            # Step 1: 按候选 locale 依次搜索，找到第一个有结果的
-            first: dict | None = None
-            app_id: int | None = None
-            for lang, cc in candidates:
-                async with session.get(
-                    f"{base}/api/storesearch",
-                    params={"term": game_query, "l": lang, "cc": cc},
-                ) as resp:
-                    if resp.status >= 400:
-                        continue
-                    payload = await resp.json(content_type=None)
+        if owns_session:
+            session = _make_session(12)
+        assert session is not None
 
-                items = payload.get("items") if isinstance(payload, dict) else None
-                if not isinstance(items, list) or not items:
-                    continue
-
-                first = items[0]
-                raw_id = first.get("id")
-                if raw_id:
-                    app_id = int(raw_id)
-                    break
-
-            if app_id is None:
-                return None
-
-            # Step 2: 用 app_id + l=english 获取英文标准名
+        # Step 1: 按候选 locale 依次搜索，找到第一个有结果的
+        first: dict | None = None
+        app_id: int | None = None
+        for lang, cc in candidates:
             async with session.get(
-                f"{base}/api/appdetails",
-                params={"appids": app_id, "l": "english", "cc": "us"},
+                f"{base}/api/storesearch",
+                params={"term": game_query, "l": lang, "cc": cc},
             ) as resp:
                 if resp.status >= 400:
-                    name = first.get("name") if first else None
-                    return ResolvedGame(english_name=str(name), app_id=app_id) if name else None
-                detail_payload = await resp.json(content_type=None)
+                    continue
+                payload = await resp.json(content_type=None)
+
+            items = payload.get("items") if isinstance(payload, dict) else None
+            if not isinstance(items, list) or not items:
+                continue
+
+            first = items[0]
+            raw_id = first.get("id")
+            if raw_id:
+                app_id = int(raw_id)
+                break
+
+        if app_id is None:
+            return None
+
+        # Step 2: 用 app_id + l=english 获取英文标准名
+        async with session.get(
+            f"{base}/api/appdetails",
+            params={"appids": app_id, "l": "english", "cc": "us"},
+        ) as resp:
+            if resp.status >= 400:
+                name = first.get("name") if first else None
+                return ResolvedGame(english_name=str(name), app_id=app_id) if name else None
+            detail_payload = await resp.json(content_type=None)
 
     except (aiohttp.ClientError, asyncio.TimeoutError, ValueError):
         return None
+    finally:
+        if owns_session and session is not None:
+            await session.close()
 
     app_data = detail_payload.get(str(app_id)) if isinstance(detail_payload, dict) else None
     if isinstance(app_data, dict) and app_data.get("success"):
@@ -299,18 +329,24 @@ async def resolve_game(game_query: str) -> ResolvedGame | None:
     return ResolvedGame(english_name=str(name), app_id=app_id) if name else None
 
 
-async def _fetch_exchange_rates(base_currency: str) -> dict[str, float]:
+@async_retry(max_attempts=2, base_delay=1.0, exceptions=(aiohttp.ClientError, asyncio.TimeoutError))
+async def _fetch_exchange_rates(
+    base_currency: str, *, session: aiohttp.ClientSession | None = None,
+) -> dict[str, float]:
     """获取以 base_currency 为基准的汇率。失败时返回空字典。"""
     url = f"https://open.er-api.com/v6/latest/{base_currency}"
-    timeout = aiohttp.ClientTimeout(total=8)
+    owns_session = session is None
     try:
-        async with aiohttp.ClientSession(timeout=timeout) as session:
-            async with session.get(url) as resp:
-                if resp.status >= 400:
-                    return {}
-                data = await resp.json(content_type=None)
-    except (aiohttp.ClientError, asyncio.TimeoutError, ValueError):
-        return {}
+        if owns_session:
+            session = _make_session(8)
+        assert session is not None
+        async with session.get(url) as resp:
+            if resp.status >= 400:
+                return {}
+            data = await resp.json(content_type=None)
+    finally:
+        if owns_session and session is not None:
+            await session.close()
 
     rates = data.get("rates") if isinstance(data, dict) else None
     if not isinstance(rates, dict):
@@ -328,40 +364,48 @@ async def fetch_all_regions(game_query: str, target_currency: str = "", user_que
     """查询所有 Steam 区域的价格，按汇率转换为 target_currency 后排序返回。"""
     from valveye.data_sources.itad import ITADSource  # 避免循环导入
 
-    resolved = await resolve_game(game_query)
-    en_name = resolved.english_name if resolved else game_query
+    session = _make_session(15)
+    try:
+        resolved = await resolve_game(game_query, session=session)
+        en_name = resolved.english_name if resolved else game_query
 
-    if not target_currency:
-        _, target_currency = _detect_region(user_query or game_query)
+        if not target_currency:
+            _, target_currency = _detect_region(user_query or game_query)
 
-    itad = ITADSource()
+        itad = ITADSource()
 
-    async def _fetch_one(region: str, currency: str, label: str) -> dict | None:
-        snapshot = await itad.fetch_price(game_query=en_name, region=region, currency=currency)
-        if snapshot is None:
-            return None
-        return {
-            "region": region,
-            "label": label,
-            "currency": snapshot.currency,
-            "price": snapshot.current_price,
-            "low": snapshot.historical_low,
-            "store": snapshot.store,
-        }
+        async def _fetch_one(region: str, currency: str, label: str) -> dict | None:
+            snapshot = await itad.fetch_price(game_query=en_name, region=region, currency=currency)
+            if snapshot is None:
+                return None
+            return {
+                "region": region,
+                "label": label,
+                "currency": snapshot.currency,
+                "price": snapshot.current_price,
+                "low": snapshot.historical_low,
+                "store": snapshot.store,
+            }
 
-    tasks = [_fetch_one(r, c, l) for r, c, l in STEAM_REGIONS]
-    results = await asyncio.gather(*tasks, return_exceptions=True)
+        tasks = [_fetch_one(r, c, l) for r, c, l in STEAM_REGIONS]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
 
-    valid: list[dict] = []
-    for r in results:
-        if isinstance(r, dict):
-            valid.append(r)
+        valid: list[dict] = []
+        for r in results:
+            if isinstance(r, dict):
+                valid.append(r)
 
-    if not valid:
-        return []
+        if not valid:
+            return []
 
-    # 汇率转换
-    rates = await _fetch_exchange_rates(target_currency)
+        # 汇率转换
+        try:
+            rates = await _fetch_exchange_rates(target_currency, session=session)
+        except (aiohttp.ClientError, asyncio.TimeoutError):
+            rates = {}
+    finally:
+        await session.close()
+
     for item in valid:
         src_currency = item["currency"]
         if src_currency == target_currency:
@@ -391,9 +435,21 @@ class LowPriceDecision:
 class PriceService:
     def __init__(self, sources: list[PriceSource]):
         self.sources = sources
+        self._session: aiohttp.ClientSession | None = None
+
+    async def _get_session(self) -> aiohttp.ClientSession:
+        if self._session is None or self._session.closed:
+            self._session = _make_session(12)
+        return self._session
+
+    async def close(self) -> None:
+        if self._session is not None and not self._session.closed:
+            await self._session.close()
+            self._session = None
 
     async def fetch_first_available(self, game_query: str, region: str, currency: str) -> PriceSnapshot:
-        resolved = await resolve_game(game_query)
+        session = await self._get_session()
+        resolved = await resolve_game(game_query, session=session)
         query = resolved.english_name if resolved else game_query
 
         last_exc: Exception | None = None

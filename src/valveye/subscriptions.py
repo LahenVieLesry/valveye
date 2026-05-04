@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import threading
 from datetime import datetime, timezone
 
 from valveye.domain import Subscription
@@ -10,15 +11,26 @@ from valveye.domain import Subscription
 class SubscriptionRepository:
     def __init__(self, db_path: str):
         self.db_path = db_path
+        self._lock = threading.Lock()
+        self._conn: sqlite3.Connection | None = None
         self._init_schema()
 
-    def _connect(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self.db_path)
-        conn.row_factory = sqlite3.Row
-        return conn
+    def _get_conn(self) -> sqlite3.Connection:
+        if self._conn is None:
+            self._conn = sqlite3.connect(self.db_path, check_same_thread=False)
+            self._conn.row_factory = sqlite3.Row
+            self._conn.execute("PRAGMA journal_mode=WAL")
+        return self._conn
+
+    def close(self) -> None:
+        with self._lock:
+            if self._conn is not None:
+                self._conn.close()
+                self._conn = None
 
     def _init_schema(self) -> None:
-        with self._connect() as conn:
+        with self._lock:
+            conn = self._get_conn()
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS subscriptions (
@@ -35,6 +47,7 @@ class SubscriptionRepository:
                 )
                 """
             )
+            conn.commit()
 
     def add(
         self,
@@ -45,18 +58,19 @@ class SubscriptionRepository:
         currency: str,
         channels: list[dict],
     ) -> tuple[int, bool]:
-        existing = self.find_active_duplicate(
-            user_id=user_id,
-            game_query=game_query,
-            window=window,
-            region=region,
-            currency=currency,
-            channels=channels,
-        )
-        if existing is not None:
-            return existing.id, False
+        with self._lock:
+            existing = self._find_active_duplicate(
+                user_id=user_id,
+                game_query=game_query,
+                window=window,
+                region=region,
+                currency=currency,
+                channels=channels,
+            )
+            if existing is not None:
+                return existing.id, False
 
-        with self._connect() as conn:
+            conn = self._get_conn()
             cur = conn.execute(
                 """
                 INSERT INTO subscriptions (user_id, game_query, window, region, currency, channels_json)
@@ -71,9 +85,10 @@ class SubscriptionRepository:
                     self._channels_to_json(channels),
                 ),
             )
+            conn.commit()
             return int(cur.lastrowid), True
 
-    def find_active_duplicate(
+    def _find_active_duplicate(
         self,
         user_id: str,
         game_query: str,
@@ -82,15 +97,15 @@ class SubscriptionRepository:
         currency: str,
         channels: list[dict],
     ) -> Subscription | None:
-        with self._connect() as conn:
-            rows = conn.execute(
-                """
-                SELECT * FROM subscriptions
-                WHERE active=1 AND user_id=? AND game_query=? AND window=? AND region=? AND currency=?
-                ORDER BY id DESC
-                """,
-                (user_id, game_query, window, region, currency),
-            ).fetchall()
+        conn = self._get_conn()
+        rows = conn.execute(
+            """
+            SELECT * FROM subscriptions
+            WHERE active=1 AND user_id=? AND game_query=? AND window=? AND region=? AND currency=?
+            ORDER BY id DESC
+            """,
+            (user_id, game_query, window, region, currency),
+        ).fetchall()
 
         normalized_channels = self._channels_to_json(channels)
         for row in rows:
@@ -99,21 +114,26 @@ class SubscriptionRepository:
         return None
 
     def list_active(self) -> list[Subscription]:
-        with self._connect() as conn:
+        with self._lock:
+            conn = self._get_conn()
             rows = conn.execute("SELECT * FROM subscriptions WHERE active=1 ORDER BY id DESC").fetchall()
         return [self._to_sub(row) for row in rows]
 
     def deactivate(self, sub_id: int) -> None:
-        with self._connect() as conn:
+        with self._lock:
+            conn = self._get_conn()
             conn.execute("UPDATE subscriptions SET active=0 WHERE id=?", (sub_id,))
+            conn.commit()
 
     def mark_notified(self, sub_id: int, low_price: float) -> None:
         now = datetime.now(tz=timezone.utc).isoformat()
-        with self._connect() as conn:
+        with self._lock:
+            conn = self._get_conn()
             conn.execute(
                 "UPDATE subscriptions SET last_notified_low=?, last_notified_at=? WHERE id=?",
                 (low_price, now, sub_id),
             )
+            conn.commit()
 
     @staticmethod
     def _channels_to_json(channels: list[dict]) -> str:

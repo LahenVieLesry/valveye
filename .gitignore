@@ -18,6 +18,17 @@ htmlcov/
 
 # Local databases/runtime
 *.db
+*.db-shm
+*.db-wal
+
+# Valveye local state & exports
+.valveye/
+valveye_*.md
+valveye_*.html
+valveye_*.json
+chat_*.md
+chat_*.html
+chat_*.json
 
 # IDE/editor local files
 .idea
