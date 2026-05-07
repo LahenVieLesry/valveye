@@ -51,7 +51,8 @@ class Settings:
     qq_onebot_url: str = os.getenv("QQ_ONEBOT_URL", "")
     qq_onebot_access_token: str = os.getenv("QQ_ONEBOT_ACCESS_TOKEN", "")
 
-    sqlite_path: str = os.getenv("SQLITE_PATH", "valveye.db")
+    chat_db_path: str = os.getenv("CHAT_DB_PATH", "chat.db")
+    subscription_db_path: str = os.getenv("SUBSCRIPTION_DB_PATH", "subscriptions.db")
 
     def validate(self) -> list[str]:
         """检查关键配置项，返回缺失或异常的警告列表。"""

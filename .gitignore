@@ -39,6 +39,9 @@ chat_*.json
 # Local tool state
 .claude/
 
+# Local CV/resume files
+cv-zh.tex
+
 # Accidental shell/device files in this environment
 .bash_profile
 .bashrc

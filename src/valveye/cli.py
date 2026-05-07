@@ -740,7 +740,7 @@ def parse_channels_arg(raw_channels: str) -> list[dict]:
 
 
 def build_services():
-    repo = SubscriptionRepository(db_path=settings.sqlite_path)
+    repo = SubscriptionRepository(db_path=settings.subscription_db_path)
     sources = [ITADSource(), SteamDBSource(), CheapSharkSource()]
     price_service = PriceService(sources=sources)
     game_data = GameDataService()

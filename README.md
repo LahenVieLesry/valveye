@@ -25,7 +25,7 @@
 
 | 能力 | 说明 |
 |:-----|:-----|
-| 💬 对话式交互 | 基于 LangChain Agent + LangGraph，支持多轮记忆与流式输出，现代 CLI 界面 |
+| 💬 对话式交互 | 基于 LangChain Agent + LangGraph，支持多轮记忆与流式输出，现代 CLI 界面，对话状态持久化到 SQLite |
 | 📉 史低价格查询 | IsThereAnyDeal / SteamDB / CheapShark 多源自动降级 |
 | 🌍 跨区价格对比 | 23 个 Steam 区域并发查询，自动汇率转换，按价格排序 |
 | 🗺️ 区域自动检测 | 输入语言 + 系统时区双重推断，无需手动指定区域/货币 |
@@ -153,7 +153,7 @@ python src/main.py chat -m "ファタモルガーナの館の価格は？"
 src/valveye/
 ├── agent.py           # LangChain Agent 构建与对话入口
 ├── agent_tools.py     # Agent 工具定义
-├── chat_store.py      # 对话持久化与多格式导出（md/json/html）
+├── chat_store.py      # 对话记录导出（md/json/html）
 ├── cli.py             # CLI 入口（chat / subscribe / check）
 ├── config.py          # 配置管理
 ├── domain.py          # 领域模型
