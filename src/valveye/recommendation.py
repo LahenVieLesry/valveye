@@ -3,8 +3,16 @@ from __future__ import annotations
 import asyncio
 import difflib
 import html
+import logging
+import math
 import re
 from dataclasses import dataclass, field
+
+logger = logging.getLogger(__name__)
+
+# BM25 parameters
+_BM25_K1 = 1.2
+_BM25_B = 0.75
 
 from valveye.config import settings
 from valveye.domain import GameProfile, RecommendationItem, RecommendationReason
@@ -285,6 +293,71 @@ class Recommender:
 
         return enriched
 
+    @staticmethod
+    def _compute_idf(all_tags: list[dict[str, int]]) -> dict[str, float]:
+        """Compute IDF from all candidates' weighted tags.
+
+        IDF(q) = ln((N - df(q) + 0.5) / (df(q) + 0.5) + 1)
+        Common tags (e.g. "Action") get low IDF; rare tags (e.g. "Roguelike Deckbuilder") get high IDF.
+        """
+        n = len(all_tags)
+        if n == 0:
+            return {}
+        df: dict[str, int] = {}
+        for tags in all_tags:
+            for tag in tags:
+                df[tag] = df.get(tag, 0) + 1
+        return {
+            tag: math.log((n - count + 0.5) / (count + 0.5) + 1)
+            for tag, count in df.items()
+        }
+
+    @staticmethod
+    def _bm25_score(
+        query_tags: dict[str, int],
+        doc_tags: dict[str, int],
+        idf: dict[str, float],
+        avg_dl: float,
+    ) -> float:
+        """BM25 score between two games' weighted tags.
+
+        query_tags / doc_tags: {tag_name: vote_count}
+        - TF = log(1 + votes), log-dampens high vote counts
+        - Document length = number of distinct tags (not vote sum)
+        """
+        dl = len(doc_tags)
+        score = 0.0
+        for tag in query_tags:
+            tf = math.log(1 + doc_tags.get(tag, 0))
+            idf_val = idf.get(tag, 0.0)
+            if idf_val <= 0 or tf <= 0:
+                continue
+            numerator = tf * (_BM25_K1 + 1)
+            denominator = tf + _BM25_K1 * (1 - _BM25_B + _BM25_B * dl / avg_dl)
+            score += idf_val * numerator / denominator
+        return score
+
+    @staticmethod
+    def _studio_affinity(a: GameProfile, b: GameProfile) -> float:
+        """Same developer/publisher → 1.0, otherwise 0.0."""
+        a_studios = {a.developer.lower(), a.publisher.lower()} - {""}
+        b_studios = {b.developer.lower(), b.publisher.lower()} - {""}
+        if not a_studios or not b_studios:
+            return 0.0
+        return 1.0 if a_studios & b_studios else 0.0
+
+    @staticmethod
+    def _quality_proximity(a: GameProfile, b: GameProfile) -> float:
+        """How close two games' negative ratios are. Closer → higher score."""
+        if a.negative_ratio is None or b.negative_ratio is None:
+            return 0.5
+        return max(0.0, 1.0 - abs(a.negative_ratio - b.negative_ratio) * 5)
+
+    @staticmethod
+    def _tag_overlap_count(target_tags: set[str], cand_tags: set[str]) -> float:
+        """Number of overlapping tags, normalized to [0, 1] with cap at 5."""
+        return min(len(target_tags & cand_tags) / 5.0, 1.0)
+
     async def _rank_with_reasons(
         self,
         target: GameProfile,
@@ -292,20 +365,41 @@ class Recommender:
         game_query: str,
         top_n: int,
     ) -> list[RecommendationItem]:
-        target_tag_set = {t.lower() for t in target.relevance_tags if t}
+        # --- BM25 IDF over candidate pool ---
+        all_weighted_tags = [cand.profile.tags_weighted for cand in candidates.values()]
+        idf = self._compute_idf(all_weighted_tags)
+        tag_counts = [len(t) for t in all_weighted_tags]
+        avg_dl = (sum(tag_counts) / len(tag_counts)) if tag_counts else 1.0
+
+        target_tags_lower = {t.lower() for t in target.tags_weighted}
         rows: list[RecommendationItem] = []
         for cand in candidates.values():
-            title = cand.profile.title
-            candidate_tags = {t.lower() for t in cand.profile.relevance_tags if t}
+            cand_tags_lower = {t.lower() for t in cand.profile.tags_weighted}
 
-            inter = sorted(target_tag_set.intersection(candidate_tags))
-            union = target_tag_set.union(candidate_tags)
-            tag_score = (len(inter) / len(union)) if union else 0.0
+            # 1. BM25 on weighted tags (primary signal)
+            bm25 = self._bm25_score(target.tags_weighted, cand.profile.tags_weighted, idf, avg_dl)
 
-            similar_score = 1.0 if "more_like_this" in cand.signals else 0.0
-            title_score = difflib.SequenceMatcher(a=game_query.lower(), b=title.lower()).ratio()
-            final_score = 0.7 * tag_score + 0.2 * similar_score + 0.1 * title_score
+            # 2. Steam "More Like This" signal
+            mlk_score = 1.0 if "more_like_this" in cand.signals else 0.0
 
+            # 3. Developer/publisher affinity
+            studio = self._studio_affinity(target, cand.profile)
+
+            # 4. Quality proximity (negative ratio closeness)
+            quality = self._quality_proximity(target, cand.profile)
+
+            # 5. Tag overlap count (absolute, not Jaccard)
+            tag_overlap = self._tag_overlap_count(target_tags_lower, cand_tags_lower)
+
+            final_score = (
+                0.50 * bm25
+                + 0.20 * mlk_score
+                + 0.10 * studio
+                + 0.10 * quality
+                + 0.10 * tag_overlap
+            )
+
+            inter = sorted(target_tags_lower & cand_tags_lower)
             downside = await self._build_downside(profile=cand.profile)
             reason = RecommendationReason(
                 tag_overlap=inter[:4],
@@ -314,14 +408,16 @@ class Recommender:
             )
             rows.append(
                 RecommendationItem(
-                    title=title,
+                    title=cand.profile.title,
                     app_id=cand.profile.app_id,
                     score=final_score,
                     tags=cand.profile.tags[:8],
                     similarity_breakdown={
-                        "tag_similarity": tag_score,
-                        "more_like_this": similar_score,
-                        "title_similarity": title_score,
+                        "bm25": bm25,
+                        "more_like_this": mlk_score,
+                        "studio_affinity": studio,
+                        "quality_proximity": quality,
+                        "tag_overlap": tag_overlap,
                     },
                     reason=reason,
                     source_signals=sorted(cand.signals),

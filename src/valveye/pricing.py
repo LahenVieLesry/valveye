@@ -430,6 +430,7 @@ class LowPriceDecision:
     is_at_low: bool
     is_new_low: bool
     window: str
+    window_low: float
 
 
 class PriceService:
@@ -451,12 +452,14 @@ class PriceService:
         session = await self._get_session()
         resolved = await resolve_game(game_query, session=session)
         query = resolved.english_name if resolved else game_query
+        app_id = resolved.app_id if resolved else None
 
         last_exc: Exception | None = None
         for source in self.sources:
             try:
                 result = await source.fetch_price(game_query=query, region=region, currency=currency)
                 if result is not None:
+                    result.app_id = app_id
                     return result
             except Exception as exc:  # noqa: BLE001
                 last_exc = exc
@@ -480,4 +483,4 @@ class PriceService:
 
         is_at_low = snapshot.current_price <= low + 1e-6
         is_new_low = known_notified_low is None or low < known_notified_low - 1e-6
-        return LowPriceDecision(snapshot=snapshot, is_at_low=is_at_low, is_new_low=is_new_low, window=window)
+        return LowPriceDecision(snapshot=snapshot, is_at_low=is_at_low, is_new_low=is_new_low, window=window, window_low=low)

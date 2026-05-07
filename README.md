@@ -17,6 +17,8 @@
 
 基于 **LangChain + LangGraph** 构建的智能对话式 Steam 助手，支持多轮对话与流式输出，集成多个价格数据源，覆盖 **23 个 Steam 区域**。
 
+核心 I/O 层采用异步架构（aiohttp / aiosqlite / AsyncIOScheduler），HTTP 请求与 Agent 状态持久化均不阻塞事件循环。
+
 </div>
 
 ---
@@ -25,14 +27,15 @@
 
 | 能力 | 说明 |
 |:-----|:-----|
-| 💬 对话式交互 | 基于 LangChain Agent + LangGraph，支持多轮记忆与流式输出，现代 CLI 界面，对话状态持久化到 SQLite |
+| 💬 对话式交互 | 基于 LangChain Agent + LangGraph，支持多轮记忆与流式输出，现代 CLI 界面，对话状态异步持久化到 SQLite（aiosqlite + AsyncSqliteSaver） |
 | 📉 史低价格查询 | IsThereAnyDeal / SteamDB / CheapShark 多源自动降级 |
 | 🌍 跨区价格对比 | 23 个 Steam 区域并发查询，自动汇率转换，按价格排序 |
 | 🗺️ 区域自动检测 | 输入语言 + 系统时区双重推断，无需手动指定区域/货币 |
 | 🌐 多语言游戏名 | 中文 / 日文 / 韩文 / 俄文等非英文名自动翻译为 Steam 官方英文名 |
-| 🎯 推荐相似游戏 | 基于标签、评测与相似产品智能推荐 |
-| 🔔 价格提醒订阅 | 史低 / 新史低触发，支持 7 种通知渠道 |
+| 🎯 推荐相似游戏 | 基于 BM25 标签权重 + Steam "More Like This" + 工作室亲和度 + 评测质量邻近度多信号融合推荐 |
+| 🔔 价格提醒订阅 | 史低 / 新史低触发，支持 7 种通知渠道，富文本通知（邮件 HTML、Telegram MarkdownV2、Discord Embed、企业微信/飞书/钉钉 Markdown） |
 | ⏰ 定时检测 | 每日自动巡检订阅游戏价格变动 |
+| 🚀 启动优惠检查 | 进入对话时自动检查所有订阅游戏的优惠状态，工具栏实时展示，Ctrl+D 查看详情 |
 
 ### 📬 通知渠道
 
@@ -76,8 +79,10 @@ python src/main.py chat -m "ファタモルガーナの館の価格は？"
 | `/` 斜杠命令 | 输入 `/` 自动补全，快速执行常用操作 |
 | 💭 思考折叠 | Agent 推理过程实时流式显示，完成后可折叠/展开（按 `T` 切换） |
 | Markdown 渲染 | AI 回复支持粗体、列表、代码块等富文本格式 |
-| 命令历史 | 上下箭头浏览历史输入 |
+| 命令历史 | 上下箭头浏览历史输入，支持多行编辑 |
 | 对话管理 | 双击 `Esc` 切换对话，`/resume` 恢复历史，`/new` 新建 |
+| 启动优惠检查 | 进入对话自动检查订阅游戏优惠，工具栏显示结果摘要 |
+| Ctrl+D 优惠详情 | 启动检查发现优惠后，Ctrl+D 弹出详情表格 |
 | 对话导出 | `/export` 导出为 Markdown / JSON / HTML，Copilot 风格折叠格式 |
 
 **可用斜杠命令：**
@@ -132,8 +137,14 @@ python src/main.py chat -m "ファタモルガーナの館の価格は？"
 
 <br/>
 
-**跨区比价与区域自动检测**
+**多轮对话与游戏搜索**
 
+<img src="img/多轮对话.png" width="600">
+<img src="img/游戏搜索.png" width="600">
+
+**跨区价格对比与区域自动检测**
+
+<img src="img/跨区价格对比.png" width="600">
 <img src="img/语言区域货币自动切换.png" width="600">
 
 **游戏推荐**
@@ -141,9 +152,14 @@ python src/main.py chat -m "ファタモルガーナの館の価格は？"
 <img src="img/游戏推荐1.png" width="600">
 <img src="img/游戏推荐2.png" width="600">
 
-**价格提醒邮件通知**
+**游戏订阅与新会话自动检测**
 
-<img src="img/提醒email.png" width="600">
+<img src="img/游戏订阅.png" width="600">
+<img src="img/新会话自动检测.png" width="600">
+
+**邮件通知**
+
+<img src="img/邮件通知.png" width="600">
 
 </details>
 
@@ -157,6 +173,7 @@ src/valveye/
 ├── cli.py             # CLI 入口（chat / subscribe / check）
 ├── config.py          # 配置管理
 ├── domain.py          # 领域模型
+├── formatter.py       # 通知消息格式化（邮件 HTML / Telegram / Discord / Markdown）
 ├── game_data.py       # Steam 游戏数据服务（详情、评测、搜索）
 ├── notifications.py   # 多渠道通知（7 种渠道）
 ├── pricing.py         # 价格查询、区域检测、汇率转换

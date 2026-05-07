@@ -2,18 +2,13 @@ from __future__ import annotations
 
 from typing import Any, AsyncIterator
 
-import sqlite3
-
+import aiosqlite
 from langchain.agents import create_agent
 from langchain_core.messages import AIMessage, HumanMessage
 from langchain_openai import ChatOpenAI
-from langgraph.checkpoint.sqlite import SqliteSaver
+from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 
 from valveye.config import settings
-
-# Module-level checkpointer for agent state persistence
-_conn = sqlite3.connect(settings.chat_db_path, check_same_thread=False)
-_checkpointer = SqliteSaver(_conn)
 
 SYSTEM_PROMPT = (
     "你是 Valveye，一个专业的 Steam 游戏顾问。你的职责是帮助玩家：\n"
@@ -150,13 +145,15 @@ def build_llm() -> ChatOpenAI:
     return ChatOpenAI(**kwargs)
 
 
-def build_agent_executor(tools: list):
+async def build_agent_executor(tools: list):
     llm = build_llm()
+    conn = await aiosqlite.connect(settings.chat_db_path)
+    checkpointer = AsyncSqliteSaver(conn)
     return create_agent(
         model=llm,
         tools=tools,
         system_prompt=SYSTEM_PROMPT,
-        checkpointer=_checkpointer,
+        checkpointer=checkpointer,
     )
 
 

@@ -6,6 +6,8 @@ from datetime import UTC, datetime
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from valveye.config import settings
+from valveye.formatter import build_notification
+from valveye.game_data import GameDataService
 from valveye.notifications import Notifier
 from valveye.pricing import PriceService
 from valveye.subscriptions import SubscriptionRepository
@@ -28,10 +30,12 @@ class PriceCheckScheduler:
         repo: SubscriptionRepository,
         price_service: PriceService,
         notifier: Notifier,
+        game_data_service: GameDataService | None = None,
     ):
         self.repo = repo
         self.price_service = price_service
         self.notifier = notifier
+        self.game_data_service = game_data_service
         self.scheduler = AsyncIOScheduler(timezone="UTC")
         self._last_run_local_date: str | None = None
 
@@ -71,13 +75,15 @@ class PriceCheckScheduler:
                 continue
 
             tag = "新史低" if decision.is_new_low else "触及史低"
-            msg = (
-                f"【{tag}】{snapshot.title}\n"
-                f"当前价: {snapshot.current_price:.2f} {snapshot.currency}\n"
-                f"史低价: {snapshot.historical_low:.2f} {snapshot.currency}\n"
-                f"来源: {snapshot.source}\n"
-                f"口径: {sub.window}"
-            )
+
+            profile = None
+            if snapshot.app_id and self.game_data_service:
+                try:
+                    profile = await self.game_data_service.fetch_profile(snapshot.app_id)
+                except Exception:
+                    profile = None
+
+            msg = build_notification(snapshot, tag, sub.window, profile)
 
             success_channels = 0
             for channel in sub.channels:
@@ -90,4 +96,4 @@ class PriceCheckScheduler:
                     continue
 
             if success_channels > 0:
-                self.repo.mark_notified(sub.id, snapshot.historical_low)
+                self.repo.mark_notified(sub.id, decision.window_low)

@@ -9,6 +9,8 @@ from valveye.config import settings
 from valveye.data_sources.cheapshark import CheapSharkSource
 from valveye.data_sources.itad import ITADSource
 from valveye.data_sources.steamdb import SteamDBSource
+from valveye.formatter import build_notification
+from valveye.game_data import GameDataService
 from valveye.notifications import Notifier
 from valveye.pricing import PriceService
 from valveye.subscriptions import SubscriptionRepository
@@ -31,12 +33,13 @@ class SelectionSpec:
     all_active: bool = False
 
 
-def build_services() -> tuple[SubscriptionRepository, PriceService, Notifier]:
-    repo = SubscriptionRepository(db_path=settings.sqlite_path)
+def build_services() -> tuple[SubscriptionRepository, PriceService, Notifier, GameDataService]:
+    repo = SubscriptionRepository(db_path=settings.subscription_db_path)
     sources = [ITADSource(), SteamDBSource(), CheapSharkSource()]
     price_service = PriceService(sources=sources)
+    game_data = GameDataService()
     notifier = Notifier()
-    return repo, price_service, notifier
+    return repo, price_service, notifier, game_data
 
 
 def parse_id_list(raw_ids: str) -> list[int]:
@@ -68,18 +71,8 @@ def select_subscriptions(subscriptions, spec: SelectionSpec):
     return []
 
 
-def build_message(snapshot, window: str, tag: str) -> str:
-    return (
-        f"【{tag}】{snapshot.title}\n"
-        f"当前价: {snapshot.current_price:.2f} {snapshot.currency}\n"
-        f"史低价: {snapshot.historical_low:.2f} {snapshot.currency}\n"
-        f"来源: {snapshot.source}\n"
-        f"口径: {window}"
-    )
-
-
 async def notify_selected_subscriptions(spec: SelectionSpec) -> int:
-    repo, price_service, notifier = build_services()
+    repo, price_service, notifier, game_data = build_services()
 
     active_subscriptions = repo.list_active()
     selected = select_subscriptions(active_subscriptions, spec)
@@ -112,7 +105,15 @@ async def notify_selected_subscriptions(spec: SelectionSpec) -> int:
             continue
 
         tag = "新史低" if decision.is_new_low else "触及史低"
-        msg = build_message(snapshot=snapshot, window=sub.window, tag=tag)
+
+        profile = None
+        if snapshot.app_id:
+            try:
+                profile = await game_data.fetch_profile(snapshot.app_id)
+            except Exception:
+                profile = None
+
+        msg = build_notification(snapshot, tag, sub.window, profile)
 
         success_channels = 0
         for channel in sub.channels:

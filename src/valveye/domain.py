@@ -21,6 +21,7 @@ class PriceSnapshot:
     historical_low_at: datetime | None = None
     history: list[PricePoint] = field(default_factory=list)
     store: str | None = None
+    app_id: int | None = None
 
 
 @dataclass(slots=True)

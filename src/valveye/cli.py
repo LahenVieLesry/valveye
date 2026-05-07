@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import dataclasses
 import json
 import sys
 import time
@@ -27,6 +28,7 @@ from valveye.config import settings
 from valveye.data_sources.cheapshark import CheapSharkSource
 from valveye.data_sources.itad import ITADSource
 from valveye.data_sources.steamdb import SteamDBSource
+from valveye.formatter import build_notification
 from valveye.game_data import GameDataService
 from valveye.notifications import Notifier
 from valveye.pricing import PriceService
@@ -98,10 +100,11 @@ class _SlashCommandCompleter(Completer):
                 )
 
 
-def _build_keybindings() -> KeyBindings:
-    """Build custom key bindings: double-Esc switch, cursor-aware up/down, / trigger."""
+def _build_keybindings(deals_state: list | None = None) -> KeyBindings:
+    """Build custom key bindings: double-Esc switch, cursor-aware up/down, / trigger, Ctrl+D deals."""
     kb = KeyBindings()
     _last_esc_time = 0.0
+    _saved_text: str | None = None  # stores text cleared by Down for Up to restore
 
     @kb.add("escape", eager=True)
     def _(event):
@@ -114,25 +117,53 @@ def _build_keybindings() -> KeyBindings:
 
     @kb.add("up")
     def _(event):
+        nonlocal _saved_text
         buf = event.current_buffer
         if buf.complete_state is not None:
             buf.complete_previous()
             return
-        if buf.cursor_position == 0:
-            buf.history_backward()
-            buf.cursor_position = len(buf.text)
+        doc = buf.document
+        # Multi-line: not on first line → move cursor up one line
+        if doc.cursor_position_row > 0:
+            buf.cursor_up()
+            return
+        # First line, not at beginning → go to beginning
+        if doc.cursor_position_col > 0:
+            buf.cursor_position = 0
+            return
+        # At beginning of first line → history backward, restore saved text if available
+        if _saved_text is not None:
+            buf.text = _saved_text
+            buf.cursor_position = len(_saved_text)
+            _saved_text = None
+            return
+        buf.history_backward()
+        buf.cursor_position = len(buf.text)
 
     @kb.add("down")
     def _(event):
+        nonlocal _saved_text
         buf = event.current_buffer
         if buf.complete_state is not None:
             buf.complete_next()
             return
-        if buf.cursor_position == len(buf.text):
-            if buf.history_forward():
-                buf.cursor_position = len(buf.text)
-            else:
-                buf.reset()
+        doc = buf.document
+        last_row = doc.line_count - 1
+        # Multi-line: not on last line → move cursor down one line
+        if doc.cursor_position_row < last_row:
+            buf.cursor_down()
+            return
+        # Last line, not at end → go to end
+        if doc.cursor_position_col < len(doc.current_line):
+            buf.cursor_position = len(buf.text)
+            return
+        # At end of last line → history forward; if no more history, clear and save
+        if buf.history_forward():
+            buf.cursor_position = len(buf.text)
+        else:
+            if buf.text:
+                _saved_text = buf.text
+            buf.reset()
 
     @kb.add("/")
     def _(event):
@@ -140,6 +171,14 @@ def _build_keybindings() -> KeyBindings:
         buffer.insert_text("/")
         if buffer.text.startswith("/"):
             buffer.start_completion(select_first=False)
+
+    @kb.add("c-d", eager=True)
+    def _(event):
+        if deals_state is not None:
+            deal_result = deals_state[1]
+            deal_ts = deals_state[2]
+            if deal_result is not None and deal_ts and time.monotonic() - deal_ts < 10:
+                event.app.exit(result="__deals__")
 
     return kb
 
@@ -244,6 +283,8 @@ def _build_toolbar(thread_id: str, turn_count: int, chat_store: ChatStore, state
     """Build a bottom_toolbar callable for PromptSession.
 
     state[0] = timestamp when hint should be shown (0 = no hint).
+    state[1] = _StartupDealResult or None (startup deal check result).
+    state[2] = timestamp when deal result was set (0 = no result).
     """
     def _toolbar():
         thread = chat_store.get_thread(thread_id)
@@ -254,6 +295,20 @@ def _build_toolbar(thread_id: str, turn_count: int, chat_store: ChatStore, state
             ("class:toolbar", f" · {model} "),
             ("class:toolbar", f" · 第{turn_count}轮 "),
         ]
+
+        # Show deal check result in toolbar for 10 seconds
+        deal_result = state[1]
+        deal_ts = state[2]
+        if deal_result is not None and deal_ts and time.monotonic() - deal_ts < 10:
+            if deal_result.at_low > 0 or deal_result.new_low > 0:
+                parts.append((
+                    "class:toolbar-deals",
+                    f" · {deal_result.total}个游戏中 {deal_result.at_low}个史低 {deal_result.new_low}个新史低 ",
+                ))
+            else:
+                parts.append(("class:toolbar", f" · {deal_result.total}个游戏无优惠 "))
+            parts.append(("class:toolbar-dim", " Ctrl+D查看详情"))
+
         if state[0] and time.monotonic() - state[0] < 2.5:
             parts.append(("class:toolbar-dim", " · EscEsc切换对话"))
         return parts
@@ -264,6 +319,7 @@ _PROMPT_STYLE = Style.from_dict({
     "prompt": "bold ansicyan",
     "toolbar": "bold ansiblack bg:ansicyan",
     "toolbar-dim": "ansiblack bg:ansicyan",
+    "toolbar-deals": "bold ansiblack bg:ansigreen",
     "completion-menu": "noinherit",
     "completion-menu.completion": "noinherit",
     "completion-menu.completion.current": "bold ansicyan noinherit",
@@ -346,6 +402,130 @@ def _show_help() -> None:
     console.print()
     console.print(Panel(t, title="[bold]命令列表[/]", border_style="dim", padding=(0, 1)))
     console.print()
+
+
+@dataclasses.dataclass
+class _StartupDealResult:
+    total: int = 0
+    at_low: int = 0
+    new_low: int = 0
+    deals: list[tuple[str, str, float, float, str, bool]] = dataclasses.field(default_factory=list)
+    # (title, currency, current_price, historical_low, source, is_new_low)
+
+
+async def _run_startup_deal_check(
+    repo: SubscriptionRepository,
+    price_service: PriceService,
+    notifier: Notifier,
+    game_data_service: GameDataService | None = None,
+) -> _StartupDealResult:
+    """Check all subscribed games for deals on session startup.
+
+    Only sends notifications for new deals (price dropped since last notified).
+    All deals are collected for display in the results table.
+    """
+    result = _StartupDealResult()
+    subs = repo.list_active()
+    if not subs:
+        return result
+
+    result.total = len(subs)
+    for sub in subs:
+        try:
+            snapshot = await price_service.fetch_first_available(
+                game_query=sub.game_query,
+                region=sub.region,
+                currency=sub.currency,
+            )
+            decision = price_service.evaluate_low(
+                snapshot=snapshot,
+                window=sub.window,
+                known_notified_low=sub.last_notified_low,
+            )
+        except Exception:
+            continue
+
+        if not (decision.is_at_low or decision.is_new_low):
+            continue
+
+        if decision.is_new_low:
+            result.new_low += 1
+        elif decision.is_at_low:
+            result.at_low += 1
+
+        result.deals.append((
+            snapshot.title,
+            snapshot.currency,
+            snapshot.current_price,
+            snapshot.historical_low,
+            snapshot.source,
+            decision.is_new_low,
+        ))
+
+        # Only notify for new deals (price dropped since last notification)
+        if decision.is_new_low:
+            tag = "新史低"
+
+            profile = None
+            if snapshot.app_id and game_data_service:
+                try:
+                    profile = await game_data_service.fetch_profile(snapshot.app_id)
+                except Exception:
+                    profile = None
+
+            msg = build_notification(snapshot, tag, sub.window, profile)
+            for ch in sub.channels:
+                try:
+                    channel = ch if isinstance(ch, dict) else json.loads(ch)
+                    await notifier.send(channel=channel, message=msg)
+                except Exception:
+                    pass
+            repo.mark_notified(sub.id, decision.window_low)
+
+    return result
+
+
+def _show_deals_table(result: _StartupDealResult) -> None:
+    """Show deals in a Rich table. Blocks until user presses Esc."""
+    if not result.deals:
+        return
+
+    t = Table(
+        show_header=True, header_style="bold", show_lines=False,
+        pad_edge=False, padding=(0, 2),
+    )
+    t.add_column("游戏", style="cyan", min_width=24)
+    t.add_column("当前价", justify="right", min_width=10)
+    t.add_column("史低价", justify="right", min_width=10)
+    t.add_column("来源", style="dim", min_width=8)
+    t.add_column("状态", min_width=8)
+
+    for title, currency, cur, low, source, is_new in result.deals:
+        status = Text("新史低", style="bold red") if is_new else Text("史低", style="yellow")
+        t.add_row(
+            title[:40],
+            f"{cur:.2f} {currency}",
+            f"{low:.2f} {currency}",
+            source,
+            status,
+        )
+
+    console.print()
+    console.print(
+        Panel(
+            t,
+            title=f"[bold]优惠结果[/]  {result.total}个游戏 · {result.at_low}个史低 · {result.new_low}个新史低",
+            border_style="green",
+            padding=(0, 1),
+        )
+    )
+    console.print("  [dim]按 Esc 返回对话[/]")
+
+    # Block until Esc
+    while True:
+        key = _read_key()
+        if key == "escape":
+            break
 
 
 def _show_model_info() -> None:
@@ -746,7 +926,7 @@ def build_services():
     game_data = GameDataService()
     recommender = Recommender(data_service=game_data)
     notifier = Notifier()
-    scheduler = PriceCheckScheduler(repo=repo, price_service=price_service, notifier=notifier)
+    scheduler = PriceCheckScheduler(repo=repo, price_service=price_service, notifier=notifier, game_data_service=game_data)
     tools = build_tools(price_service=price_service, recommender=recommender, game_data=game_data, repo=repo)
     return repo, price_service, recommender, scheduler, tools, game_data, notifier
 
@@ -834,7 +1014,7 @@ async def _run(args: argparse.Namespace) -> int:
 
     # ── chat ──────────────────────────────────────────────────────────────
     if args.command == "chat":
-        agent = build_agent_executor(tools)
+        agent = await build_agent_executor(tools)
         chat_store = ChatStore()
         thread_id = chat_store.create_thread()
 
@@ -849,8 +1029,10 @@ async def _run(args: argparse.Namespace) -> int:
             _show_welcome()
             turn_count = 0
             fold_state = "folded"
-            kb = _build_keybindings()
-            toolbar_state = [0.0]  # [0] = hint show timestamp
+            # [0] = hint show timestamp, [1] = deal result, [2] = deal result timestamp
+            toolbar_state = [0.0, None, 0.0]
+            deals_state = toolbar_state  # alias for keybinding closure
+            kb = _build_keybindings(deals_state)
 
             def _make_session():
                 return PromptSession(
@@ -860,6 +1042,31 @@ async def _run(args: argparse.Namespace) -> int:
                     bottom_toolbar=_build_toolbar(thread_id, turn_count, chat_store, toolbar_state),
                     style=_PROMPT_STYLE,
                 )
+
+            # Start background deal check on session startup
+            async def _startup_check():
+                try:
+                    console.print("  [dim]🔍 正在检查订阅游戏优惠…[/]")
+                    result = await _run_startup_deal_check(repo, price_service, notifier, game_data)
+                    if result.total == 0:
+                        console.print(f"  [green]✓[/] 暂未订阅游戏！")
+                        return
+                    total_deals = result.at_low + result.new_low
+                    if total_deals > 0:
+                        console.print(
+                            f"  [green]✓[/] {result.total}个游戏中"
+                            f" [bold]{result.at_low}[/]个史低"
+                            f" [bold red]{result.new_low}[/]个新史低"
+                            "  [dim]Ctrl+D 查看详情[/]"
+                        )
+                    else:
+                        console.print(f"  [green]✓[/] {result.total}个游戏无优惠")
+                    toolbar_state[1] = result
+                    toolbar_state[2] = time.monotonic()
+                except Exception as e:
+                    console.print(f"  [yellow]⚠ 优惠检查失败: {e}[/]")
+
+            asyncio.create_task(_startup_check())
 
             session = _make_session()
 
@@ -873,6 +1080,13 @@ async def _run(args: argparse.Namespace) -> int:
                 except (EOFError, KeyboardInterrupt):
                     console.print("\n  [dim]再见 👋[/]\n")
                     break
+
+                # Deals shortcut sentinel (Ctrl+D)
+                if user_input == "__deals__":
+                    deal_result = toolbar_state[1]
+                    if deal_result and deal_result.deals:
+                        _show_deals_table(deal_result)
+                    continue
 
                 # Double-Esc sentinel
                 if user_input == "__switch__":
