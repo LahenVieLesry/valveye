@@ -6,6 +6,7 @@ langchain-openai==1.2.1
 langgraph==1.1.8
 langgraph-checkpoint-sqlite>=3.0.0
 langgraph-prebuilt==1.0.10
+openviking>=0.3.14
 python-dotenv==1.2.2
 pydantic==2.12.5
 prompt_toolkit>=3.0

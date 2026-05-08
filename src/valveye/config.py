@@ -51,6 +51,12 @@ class Settings:
     qq_onebot_url: str = os.getenv("QQ_ONEBOT_URL", "")
     qq_onebot_access_token: str = os.getenv("QQ_ONEBOT_ACCESS_TOKEN", "")
 
+    openviking_url: str = os.getenv("OPENVIKING_URL", "http://localhost:1933")
+    openviking_api_key: str = os.getenv("OPENVIKING_API_KEY", "")
+    openviking_enabled: bool = _as_bool(os.getenv("OPENVIKING_ENABLED"), False)
+    recall_token_budget: int = int(os.getenv("RECALL_TOKEN_BUDGET", "2000"))
+    commit_interval: int = int(os.getenv("COMMIT_INTERVAL", "5"))
+
     chat_db_path: str = os.getenv("CHAT_DB_PATH", "chat.db")
     subscription_db_path: str = os.getenv("SUBSCRIPTION_DB_PATH", "subscriptions.db")
 

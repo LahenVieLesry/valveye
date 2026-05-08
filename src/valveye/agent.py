@@ -9,6 +9,7 @@ from langchain_openai import ChatOpenAI
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 
 from valveye.config import settings
+from valveye.memory import VikingMemory
 
 SYSTEM_PROMPT = (
     "你是 Valveye，一个专业的 Steam 游戏顾问。你的职责是帮助玩家：\n"
@@ -157,23 +158,47 @@ async def build_agent_executor(tools: list):
     )
 
 
-async def run_single_turn(agent, message: str, thread_id: str) -> str:
+async def run_single_turn(agent, message: str, thread_id: str, memory: VikingMemory | None = None) -> str:
     config = {"configurable": {"thread_id": thread_id}, "recursion_limit": 10}
+
+    # Auto-Recall: 注入相关记忆上下文
+    enhanced = message
+    if memory:
+        ctx = await memory.recall(query=message, session_id=thread_id)
+        if ctx:
+            enhanced = f"[相关记忆]\n{ctx}\n\n[用户消息]\n{message}"
+
     result = await agent.ainvoke(
-        {"messages": [HumanMessage(content=message)]},
+        {"messages": [HumanMessage(content=enhanced)]},
         config=config,
     )
     ai_messages = [m for m in result["messages"] if isinstance(m, AIMessage)]
+    response = "(no response)"
     if ai_messages:
         content: Any = ai_messages[-1].content
-        return str(content) if not isinstance(content, str) else content
-    return "(no response)"
+        response = str(content) if not isinstance(content, str) else content
+
+    # Auto-Capture: 记录本轮对话
+    if memory:
+        await memory.capture(thread_id, message, response)
+
+    return response
 
 
-async def stream_turn(agent, message: str, thread_id: str) -> AsyncIterator[str]:
+async def stream_turn(agent, message: str, thread_id: str, memory: VikingMemory | None = None) -> AsyncIterator[str]:
     config = {"configurable": {"thread_id": thread_id}, "recursion_limit": 10}
+
+    # Auto-Recall: 注入相关记忆上下文
+    enhanced = message
+    if memory:
+        ctx = await memory.recall(query=message, session_id=thread_id)
+        if ctx:
+            enhanced = f"[相关记忆]\n{ctx}\n\n[用户消息]\n{message}"
+
+    collected: list[str] = []
+
     async for event in agent.astream_events(
-        {"messages": [HumanMessage(content=message)]},
+        {"messages": [HumanMessage(content=enhanced)]},
         config=config,
         version="v2",
     ):
@@ -181,7 +206,9 @@ async def stream_turn(agent, message: str, thread_id: str) -> AsyncIterator[str]
         if kind == "on_chat_model_stream":
             chunk = event["data"]["chunk"]
             if chunk.content:
-                yield chunk.content if isinstance(chunk.content, str) else str(chunk.content)
+                text = chunk.content if isinstance(chunk.content, str) else str(chunk.content)
+                collected.append(text)
+                yield text
         elif kind == "on_tool_start":
             name = event.get("name", "unknown")
             inputs = event.get("data", {}).get("input", {})
@@ -207,3 +234,8 @@ async def stream_turn(agent, message: str, thread_id: str) -> AsyncIterator[str]
         elif kind == "on_tool_error":
             error = str(event.get("data", {}).get("error", "unknown error"))
             yield f"\n[工具错误: {error}]\n"
+
+    # Auto-Capture: 流式结束后记录本轮对话
+    if memory and collected:
+        full_response = "".join(collected)
+        await memory.capture(thread_id, message, full_response)

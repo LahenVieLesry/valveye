@@ -25,6 +25,7 @@ from valveye.agent import build_agent_executor, run_single_turn, stream_turn
 from valveye.agent_tools import build_tools
 from valveye.chat_store import ChatStore
 from valveye.config import settings
+from valveye.memory import VikingMemory
 from valveye.data_sources.cheapshark import CheapSharkSource
 from valveye.data_sources.itad import ITADSource
 from valveye.data_sources.steamdb import SteamDBSource
@@ -655,6 +656,7 @@ async def _run_agent_turn(
     agent, message: str, thread_id: str,
     turn_count: int, fold_state: str = "folded",
     chat_store: ChatStore | None = None,
+    memory: VikingMemory | None = None,
 ) -> tuple[int, str]:
     """Execute one agent turn.  Returns (new_turn_count, new_fold_state)."""
 
@@ -686,7 +688,7 @@ async def _run_agent_turn(
         refresh_per_second=12,
         transient=True,
     ) as live:
-        async for chunk in stream_turn(agent, message, thread_id):
+        async for chunk in stream_turn(agent, message, thread_id, memory=memory):
             if chunk.startswith("\n[调用工具:"):
                 tool_parts.append(chunk.strip())
                 thinking_done = True
@@ -784,6 +786,7 @@ async def _handle_slash_command(
     cmd_text: str, agent, thread_id: str,
     turn_count: int, fold_state: str,
     chat_store: ChatStore | None = None,
+    memory: VikingMemory | None = None,
 ) -> tuple[int | None, str, str | None]:
     """Handle a slash command. Returns (turn_count_or_None, fold_state, new_thread_id_or_None)."""
     parts = cmd_text.strip().split(maxsplit=1)
@@ -814,7 +817,7 @@ async def _handle_slash_command(
     if cmd == "/list":
         tc, fs = await _run_agent_turn(
             agent, "请帮我查看当前所有订阅列表", thread_id, turn_count, fold_state,
-            chat_store=chat_store,
+            chat_store=chat_store, memory=memory,
         )
         return tc, fs, None
 
@@ -825,7 +828,7 @@ async def _handle_slash_command(
         tc, fs = await _run_agent_turn(
             agent, f"我想订阅 {arg} 的价格提醒，请引导我完成订阅",
             thread_id, turn_count, fold_state,
-            chat_store=chat_store,
+            chat_store=chat_store, memory=memory,
         )
         return tc, fs, None
 
@@ -836,7 +839,7 @@ async def _handle_slash_command(
         tc, fs = await _run_agent_turn(
             agent, f"查询 {arg} 的当前价格和历史最低价",
             thread_id, turn_count, fold_state,
-            chat_store=chat_store,
+            chat_store=chat_store, memory=memory,
         )
         return tc, fs, None
 
@@ -847,7 +850,7 @@ async def _handle_slash_command(
         tc, fs = await _run_agent_turn(
             agent, f"推荐和 {arg} 类似的游戏",
             thread_id, turn_count, fold_state,
-            chat_store=chat_store,
+            chat_store=chat_store, memory=memory,
         )
         return tc, fs, None
 
@@ -1018,10 +1021,24 @@ async def _run(args: argparse.Namespace) -> int:
         chat_store = ChatStore()
         thread_id = chat_store.create_thread()
 
+        # OpenViking 记忆层初始化
+        memory: VikingMemory | None = None
+        if settings.openviking_enabled:
+            memory = VikingMemory()
+            healthy = await memory.health_check()
+            if healthy:
+                await memory.ensure_dirs()
+                await memory.create_session(thread_id)
+                console.print("  [green]✓[/] OpenViking 记忆层已启用")
+            else:
+                console.print("  [yellow]⚠[/] OpenViking 服务不可用，记忆层已禁用")
+                await memory.close()
+                memory = None
+
         try:
             # single-turn mode
             if args.message:
-                reply = await run_single_turn(agent, args.message, thread_id)
+                reply = await run_single_turn(agent, args.message, thread_id, memory=memory)
                 console.print(Markdown(reply))
                 return 0
 
@@ -1097,11 +1114,15 @@ async def _run(args: argparse.Namespace) -> int:
                         thread_id = chat_store.create_thread()
                         turn_count = 0
                         fold_state = "folded"
+                        if memory:
+                            await memory.create_session(thread_id)
                         console.print("  [green]✓[/] 已创建新对话")
                     elif result:
                         thread_id = result
                         turn_count = 0
                         fold_state = "folded"
+                        if memory:
+                            await memory.create_session(thread_id)
                         thread = chat_store.get_thread(thread_id)
                         title = thread.get("title", "对话") if thread else "对话"
                         console.print(f"  [green]✓[/] 已切换到: [cyan]{title}[/]")
@@ -1122,7 +1143,7 @@ async def _run(args: argparse.Namespace) -> int:
                 if user_input.startswith("/"):
                     result, fold_state, new_tid = await _handle_slash_command(
                         user_input, agent, thread_id, turn_count, fold_state,
-                        chat_store=chat_store,
+                        chat_store=chat_store, memory=memory,
                     )
                     if result is None:
                         break
@@ -1136,11 +1157,13 @@ async def _run(args: argparse.Namespace) -> int:
 
                 turn_count, fold_state = await _run_agent_turn(
                     agent, user_input, thread_id, turn_count, fold_state,
-                    chat_store=chat_store,
+                    chat_store=chat_store, memory=memory,
                 )
 
             return 0
         finally:
+            if memory:
+                await memory.close()
             await game_data.close()
             await price_service.close()
             await notifier.close()

@@ -36,6 +36,7 @@
 | 🔔 价格提醒订阅 | 史低 / 新史低触发，支持 7 种通知渠道，富文本通知（邮件 HTML、Telegram MarkdownV2、Discord Embed、企业微信/飞书/钉钉 Markdown） |
 | ⏰ 定时检测 | 每日自动巡检订阅游戏价格变动 |
 | 🚀 启动优惠检查 | 进入对话时自动检查所有订阅游戏的优惠状态，工具栏实时展示，Ctrl+D 查看详情 |
+| 🧠 长期记忆 | 基于 OpenViking 的 L0/L1/L2 三层渐进式记忆架构，自动召回相关上下文、自动提取长期记忆，跨会话个性化响应 |
 
 ### 📬 通知渠道
 
@@ -130,6 +131,39 @@ python src/main.py chat -m "ファタモルガーナの館の価格は？"
 
 > **检测优先级**：非拉丁文字直接匹配 → 系统语言 / 时区推断 → 美区兜底
 
+## 🧠 记忆架构
+
+集成 [OpenViking](https://github.com/volcengine/OpenViking)（火山引擎开源，23k+ stars）作为长期记忆层，采用 **L0 / L1 / L2 三层渐进式加载**，按需注入上下文而非全量加载，token 利用率提升 90%+。
+
+```
+用户消息 → Auto-Recall (语义检索相关记忆) → 注入上下文 → Agent 处理 → Auto-Capture (提取记忆)
+                                      ↕
+                           OpenViking Server (port 1933)
+                           viking://user/memories/  (用户偏好、实体记忆)
+                           viking://sessions/       (会话摘要)
+```
+
+| 层级 | Token | 用途 |
+|:-----|:------|:-----|
+| L0 `.abstract.md` | ~100 | 一句话摘要，用于快速索引和相关性判断 |
+| L1 `.overview.md` | ~500 | 核心信息与关键决策，注入上下文提供决策依据 |
+| L2 完整内容 | 按需 | 原始对话记录，仅在需要深入分析时加载 |
+
+**快速启用：**
+
+```bash
+# 安装并启动 OpenViking
+pip install openviking
+openviking-server init   # 交互式配置
+openviking-server        # 启动服务
+
+# 在 .env 中启用
+OPENVIKING_ENABLED=1
+
+# 可选：迁移历史对话数据
+python scripts/migrate_to_viking.py
+```
+
 ## 📸 效果展示
 
 <details>
@@ -139,8 +173,7 @@ python src/main.py chat -m "ファタモルガーナの館の価格は？"
 
 **多轮对话与游戏搜索**
 
-<img src="img/多轮对话.png" width="600">
-<img src="img/游戏搜索.png" width="600">
+<img src="img/多轮对话与游戏搜索.png" width="600">
 
 **跨区价格对比与区域自动检测**
 
@@ -175,6 +208,7 @@ src/valveye/
 ├── domain.py          # 领域模型
 ├── formatter.py       # 通知消息格式化（邮件 HTML / Telegram / Discord / Markdown）
 ├── game_data.py       # Steam 游戏数据服务（详情、评测、搜索）
+├── memory.py          # OpenViking 长期记忆层（auto-recall / auto-capture）
 ├── notifications.py   # 多渠道通知（7 种渠道）
 ├── pricing.py         # 价格查询、区域检测、汇率转换
 ├── recommendation.py  # 游戏推荐引擎
@@ -191,6 +225,8 @@ src/valveye/
 
 ## 📋 TODO
 
+- [x] OpenViking 长期记忆层集成（L0/L1/L2 三层渐进式加载）
+- [ ] 多 Agent 协作架构（Supervisor + Specialist）
 - [ ] 补充测试用例
 - [ ] 通知去重 + 重试退避 + 失败落盘
 - [ ] Web UI
