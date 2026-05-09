@@ -17,7 +17,10 @@ def build_tools(price_service: PriceService, recommender: Recommender, game_data
         user_query 为玩家的原始输入（用于自动检测区域），region/currency 留空时自动检测。"""
         if not region or not currency:
             region, currency = _detect_region(user_query or game)
-        snapshot = await price_service.fetch_first_available(game_query=game, region=region, currency=currency)
+        try:
+            snapshot = await price_service.fetch_first_available(game_query=game, region=region, currency=currency)
+        except RuntimeError:
+            return f"未找到「{game}」的价格数据，请检查游戏名称是否正确（需使用 Steam 官方英文名）。"
         decision = price_service.evaluate_low(snapshot=snapshot, window=window)
         return (
             f"{snapshot.title} | 当前价 {snapshot.current_price:.2f} {snapshot.currency} | "
@@ -184,4 +187,21 @@ def build_tools(price_service: PriceService, recommender: Recommender, game_data
         ]
         return json.dumps(payload, ensure_ascii=False)
 
-    return [query_low_price, compare_prices, search_similar_candidates, get_game_details, get_game_reviews, recommend_similar_games, subscribe_game, list_subscriptions]
+    @tool
+    def request_game_details(games: str) -> str:
+        """搜索候选后，请求详情专家获取游戏详细信息。
+        games: 逗号分隔的英文游戏名，如 "Hades, Dead Cells, Slay the Spire"。"""
+        return f"[HANDOFF_REQUEST:get_details:{games}]"
+
+    all_tools = [query_low_price, compare_prices, search_similar_candidates, get_game_details, get_game_reviews, recommend_similar_games, subscribe_game, list_subscriptions, request_game_details]
+
+    # 按 Agent 分组的工具列表
+    tool_map = {t.name: t for t in all_tools}
+    tool_groups = {
+        "price": [tool_map["query_low_price"], tool_map["compare_prices"]],
+        "info": [tool_map["get_game_details"], tool_map["get_game_reviews"]],
+        "recommend": [tool_map["search_similar_candidates"], tool_map["recommend_similar_games"], tool_map["request_game_details"]],
+        "subs": [tool_map["subscribe_game"], tool_map["list_subscriptions"]],
+    }
+
+    return all_tools, tool_groups

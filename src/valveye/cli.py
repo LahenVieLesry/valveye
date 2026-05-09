@@ -4,6 +4,9 @@ import argparse
 import asyncio
 import dataclasses
 import json
+import os
+import signal
+import subprocess
 import sys
 import time
 from datetime import datetime
@@ -21,7 +24,7 @@ from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
 
-from valveye.agent import build_agent_executor, run_single_turn, stream_turn
+from valveye.agent import build_multi_agent, run_single_turn, stream_turn
 from valveye.agent_tools import build_tools
 from valveye.chat_store import ChatStore
 from valveye.config import settings
@@ -73,6 +76,14 @@ _TOOL_DISPLAY: dict[str, str] = {
     "recommend_similar_games": "推荐相似游戏",
     "subscribe_game":         "订阅价格提醒",
     "list_subscriptions":     "查看订阅列表",
+    "request_game_details":   "请求游戏详情",
+}
+
+_AGENT_DISPLAY: dict[str, str] = {
+    "price_agent":      "价格查询",
+    "info_agent":       "游戏信息",
+    "recommend_agent":  "游戏推荐",
+    "subs_agent":       "订阅管理",
 }
 
 
@@ -662,76 +673,115 @@ async def _run_agent_turn(
 
     thinking_parts: list[str] = []
     response_parts: list[str] = []
-    tool_parts: list[str] = []
-    tool_results: list[str] = []
+    tool_calls: list[dict] = []    # {"name": ..., "inputs": ..., "output": ...}
     thinking_done = False
+    current_agent_label = ""
 
     def _live_group() -> Group:
         items: list = []
+        if current_agent_label:
+            items.append(Text(f"  [bold cyan]▸[/] {current_agent_label}"))
         if not thinking_done:
             items.append(Text("  [magenta]💭[/]  思考中…", style="dim"))
             items.append(Text("  " + "".join(thinking_parts)[-300:], style="dim"))
-        for t in tool_parts:
-            items.append(_build_tool_call(t))
-        for r in tool_results:
-            summary = _summarize_tool_result(r)
-            if summary:
-                items.append(Text(f"  [dim]  {summary}[/]"))
+        for tc in tool_calls:
+            display_name = _TOOL_DISPLAY.get(tc["name"], tc["name"])
+            game = tc["inputs"].get("game", "") if tc["inputs"] else ""
+            if game:
+                items.append(Text(f"  [blue]⚙[/]  {display_name} → {game}", style="dim"))
+            else:
+                items.append(Text(f"  [blue]⚙[/]  {display_name}", style="dim"))
+            if tc.get("output"):
+                summary = _summarize_tool_result(tc["output"])
+                if summary:
+                    items.append(Text(f"  [dim]    {summary}[/]"))
         if response_parts:
             items.append(Markdown("".join(response_parts)))
         return Group(*items)
 
-    # ── Phase 1: live-stream thinking + response ─────────────────────────
+    # ── Phase 1: live-stream ─────────────────────────────────────────────
     with Live(
         Group(Text("  [magenta]💭[/]  思考中…", style="dim")),
         console=console,
         refresh_per_second=12,
         transient=True,
     ) as live:
-        async for chunk in stream_turn(agent, message, thread_id, memory=memory):
-            if chunk.startswith("\n[调用工具:"):
-                tool_parts.append(chunk.strip())
-                thinking_done = True
-                live.update(_live_group())
-                continue
-            if chunk.startswith("\n[工具结果:"):
-                tool_results.append(chunk.strip())
-                live.update(_live_group())
-                continue
-            if chunk.startswith("\n[工具错误:"):
-                tool_results.append(chunk.strip())
-                live.update(_live_group())
-                continue
-            if not thinking_done:
-                thinking_parts.append(chunk)
-                live.update(_live_group())
-            else:
-                response_parts.append(chunk)
+        async for event in stream_turn(agent, message, thread_id, memory=memory):
+            etype = event["type"]
+
+            if etype == "agent_start":
+                agent_name = event["agent"]
+                current_agent_label = _AGENT_DISPLAY.get(agent_name, agent_name)
                 live.update(_live_group())
 
-    # ── Phase 2: render thinking panel + tools + response ────────────────
-    if not tool_parts and not thinking_done:
+            elif etype == "handoff":
+                from_label = _AGENT_DISPLAY.get(event["from"], event["from"])
+                to_label = _AGENT_DISPLAY.get(event["to"], event["to"])
+                # Show handoff in live view
+                items = _live_group().renderables
+                items.append(Text(f"  [dim]↗ {from_label} → {to_label}[/]"))
+                live.update(Group(*items))
+
+            elif etype == "token":
+                if not thinking_done:
+                    thinking_parts.append(event["content"])
+                else:
+                    response_parts.append(event["content"])
+                live.update(_live_group())
+
+            elif etype == "tool_start":
+                thinking_done = True
+                tool_calls.append({
+                    "name": event["name"],
+                    "inputs": event.get("inputs", {}),
+                    "output": "",
+                })
+                live.update(_live_group())
+
+            elif etype == "tool_end":
+                # Find the matching tool call and set its output
+                for tc in reversed(tool_calls):
+                    if tc["name"] == event["name"] and not tc["output"]:
+                        tc["output"] = event.get("output", "")
+                        break
+                live.update(_live_group())
+
+            elif etype == "agent_end":
+                live.update(_live_group())
+
+    # ── Phase 2: render final result ─────────────────────────────────────
+    # If no tool calls were made, treat thinking as response
+    if not tool_calls and not thinking_done:
         response_parts = thinking_parts
         thinking_parts = []
 
     thinking_text = "".join(thinking_parts).strip()
     response_text = "".join(response_parts).strip()
 
+    # Print agent header if multiple agents were involved
+    if current_agent_label:
+        console.print(f"\n  [bold cyan]▸[/] {current_agent_label}")
+
     _print_thinking_panel(thinking_text, fold_state)
-    for raw in tool_parts:
-        _print_tool_call(raw)
-    for raw in tool_results:
-        summary = _summarize_tool_result(raw)
-        if summary:
-            console.print(f"  [dim]  {summary}[/]")
+    for tc in tool_calls:
+        display_name = _TOOL_DISPLAY.get(tc["name"], tc["name"])
+        game = tc["inputs"].get("game", "") if tc["inputs"] else ""
+        if game:
+            console.print(f"  [blue]⚙[/]  [dim]{display_name}[/] [dim cyan]→ {game}[/]")
+        else:
+            console.print(f"  [blue]⚙[/]  [dim]{display_name}[/]")
+        if tc.get("output"):
+            summary = _summarize_tool_result(tc["output"])
+            if summary:
+                console.print(f"  [dim]    {summary}[/]")
     if response_text:
         console.print()
         console.print(Markdown(response_text))
 
-    # ── Phase 3: fold toggle via Live context ────────────────────────────
+    # ── Phase 3: fold toggle ─────────────────────────────────────────────
     if thinking_text:
         with Live(
-            _render_turn(thinking_text, fold_state, tool_parts, response_text),
+            _render_turn(thinking_text, fold_state, [], response_text),
             console=console,
             refresh_per_second=4,
             transient=False,
@@ -749,7 +799,7 @@ async def _run_agent_turn(
                 if key.strip().lower() == "t":
                     fold_state = "unfolded" if fold_state == "folded" else "folded"
                     live.update(
-                        _render_turn(thinking_text, fold_state, tool_parts, response_text)
+                        _render_turn(thinking_text, fold_state, [], response_text)
                     )
                     continue
                 break
@@ -758,16 +808,13 @@ async def _run_agent_turn(
 
     # ── Persist turn to ChatStore ────────────────────────────────────────
     if chat_store is not None:
-        for i, raw in enumerate(tool_parts):
-            inner = raw.strip().removeprefix("[调用工具:").removesuffix("]").strip()
-            name = inner.split("(")[0].strip() if "(" in inner else inner
-            args_part = inner[len(name):].strip()
-            tool_output = ""
-            if i < len(tool_results):
-                tool_output = tool_results[i].removeprefix("[工具结果:").removesuffix("]").strip()
+        for tc in tool_calls:
+            tool_output = tc.get("output", "")
+            inputs = tc.get("inputs", {})
+            args_str = ", ".join(f"{k}={v}" for k, v in inputs.items() if v) if inputs else ""
             chat_store.append_message(
-                thread_id, "tool", tool_output or args_part,
-                tool_name=name, tool_input=args_part,
+                thread_id, "tool", tool_output or args_str,
+                tool_name=tc["name"], tool_input=args_str,
             )
         if response_text:
             chat_store.append_message(
@@ -922,6 +969,67 @@ def parse_channels_arg(raw_channels: str) -> list[dict]:
     return normalized
 
 
+# ═══════════════════════════════════════════════════════════════════════════
+#  OpenViking Server lifecycle management
+# ═══════════════════════════════════════════════════════════════════════════
+
+_OV_SERVER_PROC: subprocess.Popen | None = None
+
+
+async def _is_openviking_running() -> bool:
+    """Check if OpenViking server is already running via health endpoint."""
+    import aiohttp
+    url = settings.openviking_url.rstrip("/")
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(
+                f"{url}/health",
+                timeout=aiohttp.ClientTimeout(total=2),
+            ) as resp:
+                return resp.status == 200
+    except Exception:
+        return False
+
+
+def _start_openviking_server() -> subprocess.Popen | None:
+    """Start openviking-server as a background subprocess."""
+    global _OV_SERVER_PROC
+    python_bin = sys.executable
+    try:
+        proc = subprocess.Popen(
+            [python_bin, "-m", "openviking.server.bootstrap"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            preexec_fn=os.setsid,  # create new process group for clean shutdown
+        )
+        _OV_SERVER_PROC = proc
+        return proc
+    except Exception as exc:
+        console.print(f"  [yellow]⚠[/] 启动 OpenViking 失败: {exc}")
+        return None
+
+
+def _stop_openviking_server() -> None:
+    """Stop the openviking-server subprocess if we started it."""
+    global _OV_SERVER_PROC
+    if _OV_SERVER_PROC is None:
+        return
+    try:
+        os.killpg(os.getpgid(_OV_SERVER_PROC.pid), signal.SIGTERM)
+        _OV_SERVER_PROC.wait(timeout=5)
+    except ProcessLookupError:
+        pass
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(os.getpgid(_OV_SERVER_PROC.pid), signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+    except Exception:
+        pass
+    finally:
+        _OV_SERVER_PROC = None
+
+
 def build_services():
     repo = SubscriptionRepository(db_path=settings.subscription_db_path)
     sources = [ITADSource(), SteamDBSource(), CheapSharkSource()]
@@ -1017,13 +1125,31 @@ async def _run(args: argparse.Namespace) -> int:
 
     # ── chat ──────────────────────────────────────────────────────────────
     if args.command == "chat":
-        agent = await build_agent_executor(tools)
+        all_tools, tool_groups = tools
+        agent, checkpointer_conn = await build_multi_agent(tool_groups, get_game_details_fn=tool_groups["info"][0])
         chat_store = ChatStore()
         thread_id = chat_store.create_thread()
 
-        # OpenViking 记忆层初始化
+        # OpenViking 记忆层初始化（自动启动 server）
         memory: VikingMemory | None = None
+        _ov_started_by_us = False
         if settings.openviking_enabled:
+            # 检查 server 是否已在运行
+            if not await _is_openviking_running():
+                console.print("  [dim]🚀 正在启动 OpenViking Server…[/]")
+                proc = _start_openviking_server()
+                if proc:
+                    _ov_started_by_us = True
+                    # 等待 server 就绪（最多 15 秒）
+                    for _ in range(30):
+                        await asyncio.sleep(0.5)
+                        if await _is_openviking_running():
+                            break
+                    else:
+                        console.print("  [yellow]⚠[/] OpenViking Server 启动超时")
+                        _stop_openviking_server()
+                        _ov_started_by_us = False
+
             memory = VikingMemory()
             healthy = await memory.health_check()
             if healthy:
@@ -1034,6 +1160,9 @@ async def _run(args: argparse.Namespace) -> int:
                 console.print("  [yellow]⚠[/] OpenViking 服务不可用，记忆层已禁用")
                 await memory.close()
                 memory = None
+                if _ov_started_by_us:
+                    _stop_openviking_server()
+                    _ov_started_by_us = False
 
         try:
             # single-turn mode
@@ -1164,6 +1293,10 @@ async def _run(args: argparse.Namespace) -> int:
         finally:
             if memory:
                 await memory.close()
+            if _ov_started_by_us:
+                console.print("  [dim]⏹ 正在关闭 OpenViking Server…[/]")
+                _stop_openviking_server()
+            await checkpointer_conn.close()
             await game_data.close()
             await price_service.close()
             await notifier.close()

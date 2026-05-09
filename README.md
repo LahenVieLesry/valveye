@@ -27,7 +27,7 @@
 
 | 能力 | 说明 |
 |:-----|:-----|
-| 💬 对话式交互 | 基于 LangChain Agent + LangGraph，支持多轮记忆与流式输出，现代 CLI 界面，对话状态异步持久化到 SQLite（aiosqlite + AsyncSqliteSaver） |
+| 💬 对话式交互 | 基于 LangChain + LangGraph 的 **Supervisor + 4 Specialist 多 Agent 架构**，支持多轮记忆与流式输出，现代 CLI 界面，对话状态异步持久化到 SQLite（aiosqlite + AsyncSqliteSaver） |
 | 📉 史低价格查询 | IsThereAnyDeal / SteamDB / CheapShark 多源自动降级 |
 | 🌍 跨区价格对比 | 23 个 Steam 区域并发查询，自动汇率转换，按价格排序 |
 | 🗺️ 区域自动检测 | 输入语言 + 系统时区双重推断，无需手动指定区域/货币 |
@@ -113,6 +113,7 @@ python src/main.py chat -m "ファタモルガーナの館の価格は？"
 | `recommend_similar_games` | 推荐同类游戏 | "推荐几个像空洞骑士的游戏" |
 | `subscribe_game` | 订阅价格提醒 | "Persona 5 史低时通知我" |
 | `list_subscriptions` | 查看有效订阅 | "我有哪些订阅" |
+| `request_game_details` | Agent 间 Handoff：请求游戏详情 | 推荐流程中自动触发 |
 
 ## 🌍 区域支持
 
@@ -164,6 +165,31 @@ OPENVIKING_ENABLED=1
 python scripts/migrate_to_viking.py
 ```
 
+## 🤖 多 Agent 架构
+
+采用 **Supervisor + 4 Specialist** 的 LangGraph StateGraph 架构，每个 Specialist 拥有独立的工具集与系统提示词：
+
+```text
+用户消息 → Supervisor（意图分解 → 有序任务队列）
+                ↓
+        ┌───────┼───────┬───────┐
+        ▼       ▼       ▼       ▼
+    Price    Info   Recommend  Subs
+    Agent    Agent    Agent    Agent
+        └───────┼───────┴───────┘
+                ↓
+           Post-Process（任务推进 / Handoff / 结束）
+```
+
+| Agent | 职责 | 工具 |
+|:------|:-----|:-----|
+| Price | 价格查询、跨区比价 | `query_low_price`, `compare_prices` |
+| Info | 游戏介绍、玩家评价 | `get_game_details`, `get_game_reviews` |
+| Recommend | 相似游戏推荐（含 Handoff 获取详情） | `search_similar_candidates`, `recommend_similar_games`, `request_game_details` |
+| Subs | 价格提醒订阅管理 | `subscribe_game`, `list_subscriptions` |
+
+**Handoff 机制**：Recommend Agent 在深度调查阶段通过 `request_game_details` 触发 Handoff，系统自动调用 Info Agent 的 `get_game_details` 获取游戏详情并注入上下文，无需用户干预。
+
 ## 📸 效果展示
 
 <details>
@@ -200,8 +226,9 @@ python scripts/migrate_to_viking.py
 
 ```
 src/valveye/
-├── agent.py           # LangChain Agent 构建与对话入口
-├── agent_tools.py     # Agent 工具定义
+├── agent.py           # 多 Agent 图构建（Supervisor + Specialist）与对话入口
+├── agent_tools.py     # Agent 工具定义与分组
+├── prompts.py         # 各 Agent 系统提示词（Supervisor / Price / Info / Recommend / Subs）
 ├── chat_store.py      # 对话记录导出（md/json/html）
 ├── cli.py             # CLI 入口（chat / subscribe / check）
 ├── config.py          # 配置管理
@@ -226,7 +253,7 @@ src/valveye/
 ## 📋 TODO
 
 - [x] OpenViking 长期记忆层集成（L0/L1/L2 三层渐进式加载）
-- [ ] 多 Agent 协作架构（Supervisor + Specialist）
+- [x] 多 Agent 协作架构（Supervisor + 4 Specialist）
 - [ ] 补充测试用例
 - [ ] 通知去重 + 重试退避 + 失败落盘
 - [ ] Web UI

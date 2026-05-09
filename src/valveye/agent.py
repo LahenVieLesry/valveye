@@ -1,139 +1,41 @@
 from __future__ import annotations
 
-from typing import Any, AsyncIterator
+import json as _json
+import operator
+import re
+from typing import Annotated, Any, AsyncIterator, TypedDict
 
 import aiosqlite
 from langchain.agents import create_agent
-from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
 from langchain_openai import ChatOpenAI
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
+from langgraph.graph import END, START, StateGraph
 
 from valveye.config import settings
 from valveye.memory import VikingMemory
-
-SYSTEM_PROMPT = (
-    "你是 Valveye，一个专业的 Steam 游戏顾问。你的职责是帮助玩家：\n"
-    "\n"
-    "1. **查询游戏价格**：查找游戏的当前售价和历史最低价，支持 Steam、IsThereAnyDeal、CheapShark 等多个数据源。"
-    "2. **跨区价格对比**：对比游戏在 Steam 所有支持区域的价格，帮助玩家找到最便宜的区域。"
-    "3. **查询游戏信息**：详细介绍某款游戏的背景、机制、特色和评价。"
-    "4. **推荐相似游戏**：基于语义分析和玩家偏好，推荐真正适合的游戏。"
-    "5. **订阅价格提醒**：帮助玩家设置价格监控，当游戏价格达到史低时通过邮件、Telegram、Discord 等渠道发送通知。"
-    "6. **管理订阅**：查看当前已有的价格提醒订阅。"
-    "\n"
-    "## 基本规则\n"
-    "\n"
-    "- **最重要的规则：所有工具的 game 参数必须使用英文官方名称。**\n"
-    "  底层 API 仅支持英文搜索。当玩家使用中文、日文、韩文等非英文名称时，\n"
-    "  你必须先将其翻译为 Steam 上的官方英文名，再调用工具。\n"
-    "  例如：「海市蜃楼之馆」→ \"The House in Fata Morgana\"，「女神异闻录5」→ \"Persona 5\"，\n"
-    "  「艾尔登法环」→ \"Elden Ring\"，「ファタモルガーナの館」→ \"The House in Fata Morgana\"。\n"
-    "- **区域自动检测**：价格查询和订阅工具会自动选择区域和货币，支持 23 个 Steam 区域。\n"
-    "  检测优先级：非拉丁文字直接匹配（中文→国区/CNY，日文→日区/JPY 等），\n"
-    "  拉丁文字则根据系统语言环境和时区推断。无需手动指定，除非玩家明确要求查询特定区域。\n"
-    "- **user_query 参数**：调用 query_low_price、compare_prices、subscribe_game 时，\n"
-    "  必须将玩家的原始输入文本（翻译前）填入 user_query 参数，用于自动检测区域和货币。\n"
-    "- **跨区对比**：当玩家询问「哪里最便宜」「各区域价格」「哪个区最划算」等问题时，\n"
-    "  使用 compare_prices 工具查询所有 Steam 区域的价格并自动按汇率转换排序。\n"
-    "- **查询失败时的处理**：如果工具返回失败，尝试翻译不准确、使用官方全称、或向玩家确认。\n"
-    "- 如果玩家想订阅提醒，需要确认通知渠道（如 email、telegram、discord、wecom、lark、dingtalk、qq）。\n"
-    "- 订阅时需要提供 user_id，请向玩家询问或使用默认值 \"cli_user\"。\n"
-    "- channels_json 格式示例：[{\"type\":\"email\",\"to\":\"user@example.com\"}] 或 [{\"type\":\"telegram\",\"chat_id\":\"123456\"}]。\n"
-    "- **使用玩家的语言回答**：如果玩家用中文提问则用中文回答，用日文提问则用日文回答，用英文提问则用英文回答。\n"
-    "- **所有游戏数据必须来自工具返回**，不要凭记忆编造游戏信息。"
-    "\n\n"
-    "## 查询游戏信息的呈现规范\n"
-    "\n"
-    "当玩家询问某款游戏（如「介绍一下XX」「XX是什么游戏」）时，按以下结构呈现：\n"
-    "\n"
-    "**第一步：获取数据**\n"
-    "调用 get_game_details 获取游戏详情。如果需要了解玩家评价，调用 get_game_reviews 获取好评和差评样本。"
-    "如果需要价格信息，调用 query_low_price。\n"
-    "\n"
-    "**第二步：按以下结构组织回答**\n"
-    "\n"
-    "1. **简介** — 用 2-3 句话概括游戏的核心体验，让玩家快速了解这是什么样的游戏。\n"
-    "\n"
-    "2. **关键信息** — 列出：\n"
-    "   - 开发商 / 发行商\n"
-    "   - 推出时间\n"
-    "   - 结束抢先体验时间（如有，从 detailed_description 中提取）\n"
-    "   - 支持平台（Windows / macOS / Linux）\n"
-    "   - 游戏类型（基于 genres 和 tags_weighted 中投票最高的标签）\n"
-    "\n"
-    "3. **背景设定** — 从 description 和 detailed_description 中提取世界观、故事背景、玩家扮演的角色等信息。\n"
-    "\n"
-    "4. **游戏机制** — 详细介绍核心玩法，**重点突出独特机制**：\n"
-    "   - 从 detailed_description 中提取具体的游戏系统和机制描述\n"
-    "   - 从 tags_weighted 中识别该游戏最突出的玩法标签（投票数高的标签）\n"
-    "   - 与其他同类游戏相比，这款游戏的机制有何不同\n"
-    "\n"
-    "5. **其他亮点** — 介绍视觉风格、音乐、叙事手法等其他特别出众的方面。\n"
-    "\n"
-    "6. **反响与影响** — 基于评价统计和 Metacritic 分数：\n"
-    "   - 总体评价（好评率、评价总数）\n"
-    "   - Metacritic 分数（如有）\n"
-    "   - 游戏在玩家社区中的影响力和口碑\n"
-    "\n"
-    "7. **玩家评价分析** — 调用 get_game_reviews 分别获取好评和差评样本，分析：\n"
-    "   - 玩家最赞赏的方面\n"
-    "   - 最常见的批评和不满\n"
-    "   - 帮助玩家判断这些优缺点是否与其偏好匹配\n"
-    "\n\n"
-    "## 推荐游戏的推理策略\n"
-    "\n"
-    "当玩家请求推荐相似游戏时，按以下步骤推理：\n"
-    "\n"
-    "**第一步：理解需求**\n"
-    "先了解玩家想要什么类型的相似。是：\n"
-    "- 玩法机制相似（战斗系统、建造系统、解谜方式等）\n"
-    "- 故事/世界观相似（题材、氛围、叙事风格等）\n"
-    "- 体验感受相似（节奏、难度、\"感觉\"等）\n"
-    "- 还是特定偏好（如\"像X但更短\"\"像X但有多人模式\"）\n"
-    "\n"
-    "如果玩家没有说明，主动询问一两个关键问题。\n"
-    "\n"
-    "**第二步：获取候选**\n"
-    "调用 search_similar_candidates 获取候选列表。快速浏览标签和来源信号。\n"
-    "\n"
-    "**第三步：深度调查（最多 3 个最有潜力的候选）**\n"
-    "对每个你认为最匹配的候选：\n"
-    "1. 调用 get_game_details 获取详细信息\n"
-    "2. 重点阅读 description（游戏描述比标签更能说明游戏本质）\n"
-    "3. 查看 tags_weighted（社区认为这个游戏\"是什么\"，投票数越高越能代表游戏特色）\n"
-    "4. 仅在需要了解玩家真实体验时调用 get_game_reviews（非必须步骤）\n"
-    "\n"
-    "**第四步：综合推理**\n"
-    "不要只比较标签。考虑：\n"
-    "- 游戏描述中的核心玩法描述是否相似\n"
-    "- 社区加权标签反映的游戏\"身份\"是否匹配\n"
-    "- 玩家评论中提到的体验是否与源游戏相关\n"
-    "- 差评中的问题是否影响推荐（如果某候选的差评恰好是用户喜欢的特性，则不应推荐）\n"
-    "\n"
-    "**第五步：个性化呈现**\n"
-    "**注意**：所有游戏数据必须来自工具返回，不要凭记忆编造游戏信息。"
-    "对每个被推荐的游戏，**简洁但有深度**地介绍，重点说明三点：\n"
-    "\n"
-    "1. **最为独特的点** — 这款游戏最与众不同的是什么（而非泛泛的标签罗列）。\n"
-    "   从 description 和 tags_weighted 中提炼出真正让它脱颖而出的特色。\n"
-    "\n"
-    "2. **与源游戏的共性** — 它和玩家提到的游戏有哪些具体的相似之处。\n"
-    "   不要只说\"都是动作游戏\"，而要说具体的机制、体验或设计哲学上的共同点。\n"
-    "\n"
-    "3. **关键不同** — 值得注意的区别，让玩家知道会获得什么新体验。\n"
-    "   如果有差评中反映的问题，也可以在此提及作为参考。\n"
-    "\n"
-    "最后如果有价格信息，可以一并给出购买建议。"
-    "\n\n"
-    "## 效率规则\n"
-    "\n"
-    "- **简单查询一次调用**：查价格只需 query_low_price，查游戏信息只需 get_game_details，不要多此一举。\n"
-    "- **找到就用**：一旦通过工具获得了游戏的英文名和数据，直接使用，不要重复搜索或再次确认。\n"
-    "- **不确定就问**：如果用户给出的游戏名模糊且搜索返回多个候选项，直接列出候选项让用户选择，不要猜测。\n"
-    "- **推荐流程精简**：推荐相似游戏时，search_similar_candidates 后最多深入调查 3 个候选，get_game_reviews 仅在需要了解玩家体验时调用（非必须）。整个推荐流程工具调用总计不超过 5 次。\n"
-    "- **不要重复调用同一个工具**：如果已经查过某游戏的价格或详情，不要再查一次。"
+from valveye.prompts import (
+    INFO_AGENT_PROMPT,
+    PRICE_AGENT_PROMPT,
+    RECOMMEND_AGENT_PROMPT,
+    SUBS_AGENT_PROMPT,
+    SUPERVISOR_PROMPT,
 )
 
+
+# ── State schema ───────────────────────────────────────────────────────────
+
+class SupervisorState(TypedDict):
+    messages: Annotated[list[BaseMessage], operator.add]
+    active_agent: str
+    task_queue: list[dict]
+    current_task_index: int
+    accumulated_context: dict[str, str]
+    iteration_count: int
+    original_query: str
+
+
+# ── LLM builder ───────────────────────────────────────────────────────────
 
 def build_llm() -> ChatOpenAI:
     kwargs: dict = {
@@ -146,22 +48,332 @@ def build_llm() -> ChatOpenAI:
     return ChatOpenAI(**kwargs)
 
 
-async def build_agent_executor(tools: list):
+# ── Handoff marker ────────────────────────────────────────────────────────
+
+_HANDOFF_PATTERN = re.compile(r"\[HANDOFF_REQUEST:(\w+):([^\]]+)\]")
+
+
+# ── Multi-agent graph builder ─────────────────────────────────────────────
+
+async def build_multi_agent(
+    tool_groups: dict[str, list],
+    get_game_details_fn,
+) -> Any:
+    """Build the Supervisor + Specialist multi-agent graph."""
     llm = build_llm()
-    conn = await aiosqlite.connect(settings.chat_db_path)
-    checkpointer = AsyncSqliteSaver(conn)
-    return create_agent(
-        model=llm,
-        tools=tools,
-        system_prompt=SYSTEM_PROMPT,
-        checkpointer=checkpointer,
+
+    # --- Build specialist agents as compiled subgraphs ---
+    price_agent = create_agent(
+        model=build_llm(),
+        tools=tool_groups["price"],
+        system_prompt=PRICE_AGENT_PROMPT,
+        name="price_agent",
+    )
+    info_agent = create_agent(
+        model=build_llm(),
+        tools=tool_groups["info"],
+        system_prompt=INFO_AGENT_PROMPT,
+        name="info_agent",
+    )
+    recommend_agent = create_agent(
+        model=build_llm(),
+        tools=tool_groups["recommend"],
+        system_prompt=RECOMMEND_AGENT_PROMPT,
+        name="recommend_agent",
+    )
+    subs_agent = create_agent(
+        model=build_llm(),
+        tools=tool_groups["subs"],
+        system_prompt=SUBS_AGENT_PROMPT,
+        name="subs_agent",
     )
 
+    # --- Supervisor routing LLM (plain, no structured output) ---
+    router_llm = llm
 
-async def run_single_turn(agent, message: str, thread_id: str, memory: VikingMemory | None = None) -> str:
-    config = {"configurable": {"thread_id": thread_id}, "recursion_limit": 10}
+    # --- Graph nodes ---
 
-    # Auto-Recall: 注入相关记忆上下文
+    async def route_supervisor(state: SupervisorState) -> dict:
+        """LLM-based intent decomposition → ordered task queue."""
+        messages = state["messages"]
+        if not messages:
+            return {"active_agent": "info", "task_queue": [{"agent": "info", "query": ""}], "current_task_index": 0}
+
+        last_msg = messages[-1]
+        raw_content = last_msg.content if hasattr(last_msg, "content") else str(last_msg)
+        content = raw_content if isinstance(raw_content, str) else str(raw_content)
+
+        result = await router_llm.ainvoke([
+            SystemMessage(content=SUPERVISOR_PROMPT),
+            HumanMessage(content=content),
+        ])
+        raw = result.content if isinstance(result.content, str) else str(result.content)
+
+        # Parse JSON: {"tasks": [{"agent": "price", "query": "..."}, ...]}
+        task_queue: list[dict] = []
+        try:
+            json_match = re.search(r'\{.*\}', raw, re.DOTALL)
+            if json_match:
+                data = _json.loads(json_match.group())
+                tasks = data.get("tasks", [])
+                for t in tasks:
+                    agent_name = t.get("agent", "info")
+                    if agent_name in ("price", "info", "recommend", "subs"):
+                        task_queue.append({"agent": agent_name, "query": t.get("query", content)})
+        except (ValueError, TypeError):
+            pass
+
+        # Fallback: single info task
+        if not task_queue:
+            task_queue = [{"agent": "info", "query": content}]
+
+        import logging
+        logging.getLogger(__name__).info(
+            "route_supervisor: query=%r → tasks=%s", content[:50],
+            [(t["agent"], t["query"][:30]) for t in task_queue],
+        )
+
+        return {
+            "active_agent": task_queue[0]["agent"],
+            "task_queue": task_queue,
+            "current_task_index": 0,
+            "original_query": content,
+        }
+
+    def route_to_agent(state: SupervisorState) -> str:
+        """Read current task from queue, return agent node name."""
+        queue = state.get("task_queue", [])
+        idx = state.get("current_task_index", 0)
+        if queue and idx < len(queue):
+            agent = queue[idx]["agent"]
+        else:
+            agent = state.get("active_agent", "info")
+        return f"{agent}_agent"
+
+    def pre_process_node(state: SupervisorState) -> dict:
+        """Inject current task query as a HumanMessage for the agent."""
+        queue = state.get("task_queue", [])
+        idx = state.get("current_task_index", 0)
+        if queue and idx < len(queue):
+            task = queue[idx]
+            return {
+                "messages": [HumanMessage(content=task["query"])],
+                "active_agent": task["agent"],
+            }
+        return {}
+
+    async def post_process_node(state: SupervisorState) -> dict:
+        """Detect handoff requests, advance task queue, or finish."""
+        messages = state["messages"]
+        accumulated = dict(state.get("accumulated_context", {}))
+        iteration = state.get("iteration_count", 0) + 1
+        queue = state.get("task_queue", [])
+        idx = state.get("current_task_index", 0)
+
+        # Scan recent messages for handoff markers
+        for msg in reversed(messages[-5:]):
+            raw = msg.content if hasattr(msg, "content") else str(msg)
+            content = raw if isinstance(raw, str) else str(raw)
+            match = _HANDOFF_PATTERN.search(content)
+            if match:
+                req_type, req_data = match.group(1), match.group(2)
+                games = [g.strip() for g in req_data.split(",")]
+
+                if req_type == "get_details":
+                    details_parts = []
+                    for game in games:
+                        cache_key = f"game_details:{game}"
+                        if cache_key not in accumulated:
+                            try:
+                                result = await get_game_details_fn.ainvoke({"game": game})
+                                accumulated[cache_key] = result
+                            except Exception as e:
+                                result = f"获取失败: {e}"
+                                accumulated[cache_key] = result
+                            details_parts.append(f"--- {game} ---\n{result}")
+                        else:
+                            details_parts.append(f"--- {game} ---\n{accumulated[cache_key]}")
+
+                    context_msg = AIMessage(
+                        content="[系统注入的游戏详情]\n\n" + "\n\n".join(details_parts),
+                    )
+                    return {
+                        "messages": [context_msg],
+                        "accumulated_context": accumulated,
+                        "active_agent": "recommend",
+                        "iteration_count": iteration,
+                    }
+                break
+
+        # No handoff — advance to next task in queue
+        next_idx = idx + 1
+        if next_idx < len(queue):
+            return {
+                "current_task_index": next_idx,
+                "active_agent": queue[next_idx]["agent"],
+                "accumulated_context": accumulated,
+                "iteration_count": iteration,
+            }
+
+        # All tasks done
+        return {
+            "iteration_count": iteration,
+            "active_agent": "finish",
+        }
+
+    def route_after_post_process(state: SupervisorState) -> str:
+        """Decide next step after post-processing."""
+        if state.get("iteration_count", 0) >= 10:
+            return "__end__"
+
+        active = state.get("active_agent", "finish")
+        if active == "finish":
+            return "__end__"
+
+        # Handoff: route to handoff target (e.g. recommend → info for details)
+        return f"{active}_agent"
+
+    # --- Build graph ---
+    builder = StateGraph(SupervisorState)
+
+    # Routing node
+    builder.add_node("route_supervisor", route_supervisor)
+    builder.add_node("pre_process", pre_process_node)
+
+    # Specialist agent nodes (compiled subgraphs)
+    builder.add_node("price_agent", price_agent)
+    builder.add_node("info_agent", info_agent)
+    builder.add_node("recommend_agent", recommend_agent)
+    builder.add_node("subs_agent", subs_agent)
+
+    # Post-processing
+    builder.add_node("post_process", post_process_node)
+
+    # --- Edges ---
+    builder.add_edge(START, "route_supervisor")
+    builder.add_conditional_edges("route_supervisor", route_to_agent, {
+        "price_agent": "pre_process",
+        "info_agent": "pre_process",
+        "recommend_agent": "pre_process",
+        "subs_agent": "pre_process",
+    })
+
+    # After pre_process, route to the correct agent
+    builder.add_conditional_edges("pre_process", route_to_agent, {
+        "price_agent": "price_agent",
+        "info_agent": "info_agent",
+        "recommend_agent": "recommend_agent",
+        "subs_agent": "subs_agent",
+    })
+
+    # After each agent → post_process
+    builder.add_edge("price_agent", "post_process")
+    builder.add_edge("info_agent", "post_process")
+    builder.add_edge("recommend_agent", "post_process")
+    builder.add_edge("subs_agent", "post_process")
+
+    # After post_process → route or end
+    builder.add_conditional_edges("post_process", route_after_post_process, {
+        "price_agent": "pre_process",
+        "info_agent": "pre_process",
+        "recommend_agent": "pre_process",
+        "subs_agent": "pre_process",
+        "__end__": END,
+    })
+
+    # --- Compile with checkpointer ---
+    conn = await aiosqlite.connect(settings.chat_db_path)
+    checkpointer = AsyncSqliteSaver(conn)
+    return builder.compile(checkpointer=checkpointer), conn
+
+
+# ── Streaming turn (structured events) ────────────────────────────────────
+
+_AGENT_NAMES = {"price_agent", "info_agent", "recommend_agent", "subs_agent"}
+
+
+async def stream_turn(
+    agent, message: str, thread_id: str, memory: VikingMemory | None = None,
+) -> AsyncIterator[dict]:
+    """Execute one turn, yielding structured event dicts.
+
+    Event types:
+      {"type": "agent_start", "agent": "price_agent"}
+      {"type": "handoff", "from": "recommend_agent", "to": "info_agent"}
+      {"type": "token", "content": "..."}
+      {"type": "tool_start", "name": "...", "agent": "...", "inputs": {...}}
+      {"type": "tool_end", "name": "...", "output": "..."}
+      {"type": "agent_end", "agent": "price_agent"}
+    """
+    config = {"configurable": {"thread_id": thread_id}, "recursion_limit": 20}
+
+    enhanced = message
+    if memory:
+        ctx = await memory.recall(query=message, session_id=thread_id)
+        if ctx:
+            enhanced = f"[相关记忆]\n{ctx}\n\n[用户消息]\n{message}"
+
+    current_agent = ""
+    collected: list[str] = []
+
+    async for event in agent.astream_events(
+        {"messages": [HumanMessage(content=enhanced)]},
+        config=config,
+        version="v2",
+    ):
+        kind = event.get("event")
+        name = event.get("name", "")
+
+        # Detect agent transitions
+        if kind == "on_chain_start" and name in _AGENT_NAMES:
+            if current_agent and current_agent != name:
+                yield {"type": "handoff", "from": current_agent, "to": name}
+            current_agent = name
+            yield {"type": "agent_start", "agent": name}
+
+        elif kind == "on_chat_model_stream" and current_agent:
+            # Only capture tokens from specialist agent subgraphs,
+            # not from the supervisor's internal routing LLM call
+            chunk = event["data"]["chunk"]
+            if chunk.content:
+                text = chunk.content if isinstance(chunk.content, str) else str(chunk.content)
+                collected.append(text)
+                yield {"type": "token", "content": text}
+
+        elif kind == "on_tool_start" and current_agent:
+            tool_name = event.get("name", "unknown")
+            inputs = event.get("data", {}).get("input", {})
+            yield {"type": "tool_start", "name": tool_name, "agent": current_agent, "inputs": inputs}
+
+        elif kind == "on_tool_end" and current_agent:
+            output_obj = event.get("data", {}).get("output", "")
+            if hasattr(output_obj, "content"):
+                output = str(output_obj.content)
+            else:
+                output = str(output_obj)
+            yield {"type": "tool_end", "name": event.get("name", ""), "output": output}
+
+        elif kind == "on_tool_error" and current_agent:
+            error = str(event.get("data", {}).get("error", "unknown error"))
+            yield {"type": "tool_end", "name": event.get("name", ""), "output": f"错误: {error}"}
+
+        elif kind == "on_chain_end" and name in _AGENT_NAMES:
+            yield {"type": "agent_end", "agent": name}
+            current_agent = ""
+
+    # Auto-Capture
+    if memory and collected:
+        full_response = "".join(collected)
+        await memory.capture(thread_id, message, full_response)
+
+
+# ── Non-streaming turn ────────────────────────────────────────────────────
+
+async def run_single_turn(
+    agent, message: str, thread_id: str, memory: VikingMemory | None = None,
+) -> str:
+    config = {"configurable": {"thread_id": thread_id}, "recursion_limit": 20}
+
     enhanced = message
     if memory:
         ctx = await memory.recall(query=message, session_id=thread_id)
@@ -178,64 +390,7 @@ async def run_single_turn(agent, message: str, thread_id: str, memory: VikingMem
         content: Any = ai_messages[-1].content
         response = str(content) if not isinstance(content, str) else content
 
-    # Auto-Capture: 记录本轮对话
     if memory:
         await memory.capture(thread_id, message, response)
 
     return response
-
-
-async def stream_turn(agent, message: str, thread_id: str, memory: VikingMemory | None = None) -> AsyncIterator[str]:
-    config = {"configurable": {"thread_id": thread_id}, "recursion_limit": 10}
-
-    # Auto-Recall: 注入相关记忆上下文
-    enhanced = message
-    if memory:
-        ctx = await memory.recall(query=message, session_id=thread_id)
-        if ctx:
-            enhanced = f"[相关记忆]\n{ctx}\n\n[用户消息]\n{message}"
-
-    collected: list[str] = []
-
-    async for event in agent.astream_events(
-        {"messages": [HumanMessage(content=enhanced)]},
-        config=config,
-        version="v2",
-    ):
-        kind = event.get("event")
-        if kind == "on_chat_model_stream":
-            chunk = event["data"]["chunk"]
-            if chunk.content:
-                text = chunk.content if isinstance(chunk.content, str) else str(chunk.content)
-                collected.append(text)
-                yield text
-        elif kind == "on_tool_start":
-            name = event.get("name", "unknown")
-            inputs = event.get("data", {}).get("input", {})
-            # Build a compact summary: extract key params only
-            game = inputs.get("game", "")
-            if game:
-                summary = game
-            elif name == "list_subscriptions":
-                summary = ""
-            else:
-                summary = ", ".join(f"{k}={v}" for k, v in inputs.items() if v and k != "user_query")
-            yield f"\n[调用工具: {name}({summary})]\n"
-        elif kind == "on_tool_end":
-            output_obj = event.get("data", {}).get("output", "")
-            # Extract clean content from ToolMessage objects
-            if hasattr(output_obj, "content"):
-                output = str(output_obj.content)
-            else:
-                output = str(output_obj)
-            if len(output) > 500:
-                output = output[:500] + "..."
-            yield f"\n[工具结果: {output}]\n"
-        elif kind == "on_tool_error":
-            error = str(event.get("data", {}).get("error", "unknown error"))
-            yield f"\n[工具错误: {error}]\n"
-
-    # Auto-Capture: 流式结束后记录本轮对话
-    if memory and collected:
-        full_response = "".join(collected)
-        await memory.capture(thread_id, message, full_response)
