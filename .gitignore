@@ -41,6 +41,7 @@ chat_*.json
 
 # Local CV/resume files
 cv-zh.tex
+cv-zh-polished.tex
 
 # Accidental shell/device files in this environment
 .bash_profile
