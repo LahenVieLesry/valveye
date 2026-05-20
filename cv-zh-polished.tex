@@ -1,0 +1,243 @@
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+% 中文版学术简历 — 美化版
+% 编译方式：XeLaTeX
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+\documentclass[a4paper,10pt]{article}
+
+%----------------------------------------------------------------------------------------
+%	字体与基础宏包
+%----------------------------------------------------------------------------------------
+\usepackage{fontspec}
+\usepackage{xeCJK}
+\usepackage{parskip}
+\usepackage[table,svgnames]{xcolor}
+\usepackage{geometry}
+\usepackage{hyperref}
+\usepackage{titlesec}
+\usepackage{tabularx}
+\usepackage{array}
+\usepackage{booktabs}
+\usepackage{enumitem}
+\usepackage{multicol}
+\usepackage{fontawesome5}
+\usepackage{tikz}
+\usepackage{ifthen}
+
+\defaultfontfeatures{Mapping=tex-text}
+
+\setmainfont{texgyrepagella}[
+    Extension=.otf,
+    UprightFont=*-regular,
+    BoldFont=*-bold,
+    ItalicFont=*-italic,
+    BoldItalicFont=*-bolditalic
+]
+\setCJKmainfont{Noto Serif CJK SC}
+\setCJKsansfont{Noto Sans CJK SC}
+
+\geometry{left=2cm,right=2cm,top=2.2cm,bottom=2.2cm}
+\pagestyle{empty}
+
+%----------------------------------------------------------------------------------------
+%	配色方案
+%----------------------------------------------------------------------------------------
+\definecolor{themecolor}{RGB}{30,65,125}
+\definecolor{lightline}{RGB}{190,205,225}
+\definecolor{accentbg}{RGB}{240,245,252}
+\definecolor{tagbg}{RGB}{232,240,250}
+\definecolor{tagtext}{RGB}{40,70,130}
+\definecolor{lightgray}{RGB}{120,120,120}
+\definecolor{skillbar}{RGB}{30,65,125}
+\definecolor{skillbarbg}{RGB}{225,232,242}
+
+\hypersetup{
+    colorlinks=true,
+    breaklinks=true,
+    urlcolor=themecolor,
+    linkcolor=themecolor
+}
+
+%----------------------------------------------------------------------------------------
+%	标题样式
+%----------------------------------------------------------------------------------------
+\titleformat{\section}{\large\bfseries\color{themecolor}}{}{0em}{}[{\color{lightline}\titlerule}]
+\titlespacing{\section}{0pt}{2em}{1em}
+
+%----------------------------------------------------------------------------------------
+%	自定义命令
+%----------------------------------------------------------------------------------------
+% 技能条
+\newcommand{\skillbar}[2]{%
+    \begin{tikzpicture}[baseline=-0.3em]
+        \fill[skillbarbg] (0,0) rectangle (3.5em,0.35em);
+        \fill[skillbar] (0,0) rectangle ({3.5*#2/5}em,0.35em);
+    \end{tikzpicture}%
+}
+
+% 标签
+\newcommand{\cvtag}[1]{%
+    \tikz[baseline=-0.5ex]\node[fill=tagbg, text=tagtext, rounded corners=2pt, inner xsep=4pt, inner ysep=1.5pt, font=\small\bfseries]{#1};%
+}
+
+% 带图标的联系方式
+\newcommand{\contactitem}[2]{\raisebox{-0.15ex}{#1}\,#2}
+
+\begin{document}
+
+%----------------------------------------------------------------------------------------
+%	页眉
+%----------------------------------------------------------------------------------------
+
+\begin{center}
+    {\Huge\bfseries\color{themecolor} 黄煜珩}\\[6pt]
+    {\large\color{lightgray} 宁波大学\,\textbar\,计算机科学与技术\,\textbar\,学硕}\\[8pt]
+    {\small\color{themecolor}
+    \contactitem{\faPhone}{+86\,139\,6232\,0052} \quad
+    \contactitem{\faEnvelope}{\href{mailto:2130588669@qq.com}{2130588669@qq.com}} \quad
+    \contactitem{\faEnvelope}{\href{mailto:hihyhenry@gmail.com}{hihyhenry@gmail.com}}
+    % \contactitem{\faGraduationCap}{\href{https://scholar.google.com/citations?user=JR3GvqAAAAAJ}{Google Scholar}} \quad
+    % \contactitem{\faGithub}{\href{https://github.com/LahenVieLesry}{GitHub}} \quad
+    % \contactitem{\faUniversity}{\href{https://www.nbu.edu.cn}{宁波大学}}
+    }
+\end{center}
+
+%----------------------------------------------------------------------------------------
+%	个人简介
+%----------------------------------------------------------------------------------------
+
+\section{个人简介}
+
+\begin{minipage}[t]{\textwidth}
+\vspace{2pt}
+宁波大学计算机科学与技术硕士应届生，专注\textbf{多媒体信息安全与人工智能安全}方向。硕士期间以第一作者在 \textbf{IEEE TIFS}（CCF-A / SCI 一区）投稿 2 篇、\textbf{Interspeech}（CCF-B）发表 1 篇，累计参与发表/投稿论文 \textbf{10 篇}。具备从算法设计、模型训练到工程落地的全栈研发能力。
+\vspace{8pt}
+\end{minipage}
+
+\begin{tabularx}{\textwidth}{@{}p{2.8cm}X@{}}
+
+\textbf{\color{themecolor}\faShieldAlt\;模型安全性评估研究} &
+\parbox[t]{\hsize}{\small
+\textbullet\;\textbf{攻击侧}：设计梯度与特征空间样本筛选框架 + 中心覆盖多折选择算法，投毒率 $\leq 0.05\%$ 下攻击成功率从近 0 提升至 \textbf{70\%}\\
+\textbullet\;开发基于音频压缩的后门攻击工具链 CBA，5\% 投毒率下达攻击成功率 $>$ \textbf{99\%}，发表于 \cvtag{Interspeech 2025}\\
+\textbullet\;\textbf{防御侧}：构建动量孪生范式 MoSia 无数据后门防御框架，已在 \textbf{4 类任务、6 种攻击方法}上完成端到端验证
+} \\
+
+\textbf{\color{themecolor}\faWaveSquare\;深度学习与音频信号处理} &
+\parbox[t]{\hsize}{\small
+\textbullet\;PyTorch 全栈工程：数据预处理 $\rightarrow$ 自定义 Dataset/DataLoader $\rightarrow$ 分布式训练 $\rightarrow$ TensorBoard 可视化\\
+\textbullet\;音频编解码\cvtag{MP3}\cvtag{AAC}\cvtag{FLAC} \;|\; 时频分析\cvtag{STFT}\cvtag{Mel}\cvtag{DWT} \;|\; 语音处理 pipeline
+} \\
+
+\textbf{\color{themecolor}\faRobot\;LLM \& Agent 工程} &
+\parbox[t]{\hsize}{\small
+\textbullet\;独立交付 \href{https://github.com/LahenVieLesry/valveye}{\textbf{Valveye}}：\cvtag{LangChain}\cvtag{LangGraph} Supervisor + 4 Specialist 多 Agent 系统\\
+\textbullet\;三源容错降级、23 区域异步并发比价 + 实时汇率转换；Rich CLI 交互系统与多渠道消息推送\\
+\textbullet\;设计 9 个领域工具，实现意图分解、任务路由与 Agent Handoff 协作\\
+\textbullet\;集成 ReAct 多步推理与 \cvtag{OpenViking} L0/L1/L2 三层记忆架构（token 利用率 \textbf{+90\%}）
+}
+\end{tabularx}
+
+%----------------------------------------------------------------------------------------
+%	教育背景与获奖
+%----------------------------------------------------------------------------------------
+
+\section{教育背景与获奖}
+
+\begin{tabularx}{\textwidth}{@{}p{2.8cm}X@{}}
+\textbf{2023.09 -- 至今} & \textbf{宁波大学}（浙江宁波）\quad 计算机科学与技术\;\textbf{学术型硕士} \\[1pt]
+& GPA \textbf{3.55}/4.0 \;\textbar\; 排名 \textbf{前 10\%}\\[2pt]
+& \cvtag{二等奖学金$\times$2} \;\cvtag{华为杯数模国三} \\[6pt]
+
+\textbf{2019.09 -- 2023.06} & \textbf{苏州工学院}（江苏苏州）\quad 计算机科学与技术\;\textbf{学士} \\[1pt]
+& GPA \textbf{3.49}/4.0 \;\textbar\; 排名 \textbf{前 10\%} \\[2pt]
+& \cvtag{二等奖学金$\times$3} \;\cvtag{蓝桥杯国二} \;\cvtag{蓝桥杯省一} \;\cvtag{数竞国三} \\
+\end{tabularx}
+
+%----------------------------------------------------------------------------------------
+%	专业技能
+%----------------------------------------------------------------------------------------
+
+\section{专业技能}
+
+% \begin{multicols}{1}
+\begin{itemize}
+    \item \textbf{操作系统：}Linux（Ubuntu / Debian / Arch）、Windows
+    \item \textbf{编程语言：}Python、C/C++、Shell、SQL
+    \item \textbf{深度学习：}PyTorch（TorchVision / TorchAudio / DataParallel）、TensorBoard、Hugging Face
+    \item \textbf{Agent：}Claude Code、Openclaw、Hermes、LangChain、工具编排、记忆管理、ReAct
+    \item \textbf{音频信号处理：}STFT / ISTFT、Mel 频谱、小波变换、心理声学模型、音频编解码
+    \item \textbf{数据科学：}NumPy、Pandas、Scikit-learn、SciPy、Matplotlib
+    \item \textbf{工程与平台：}\LaTeX{}、Git、GitHub、Docker、CMake、APScheduler、Rich CLI
+    \item \textbf{开发工具：}VS Code、Jupyter Notebook、SSH、PyCharm、MySQL
+    \item \textbf{语言能力：}CET-6（544 分）\;\textbar\; 日语（成人自考）
+\end{itemize}
+% \end{multicols}
+
+\newpage
+%----------------------------------------------------------------------------------------
+%	研究开发经历
+%----------------------------------------------------------------------------------------
+\section{研究开发经历}
+
+\begin{tabularx}{\textwidth}{@{}p{2.8cm}X@{}}
+\textbf{2023.09 -- 至今} & \textbf{深度学习后门攻防研究} \quad {\small\color{lightgray} 宁波大学多媒体信息安全实验室} \\
+& \par\smallskip
+\par\smallskip\hangindent=1em\textbullet\;独立设计并实现\textbf{后门样本筛选系统}：基于 PyTorch 提取训练过程中的梯度与特征空间信息，构建重要性评分函数，配合中心覆盖多折选择算法保证筛选多样性，代码涵盖数据预处理、模型训练、自动化实验与结果可视化全流程
+\par\smallskip\hangindent=1em\textbullet\;开发\textbf{基于音频压缩的后门攻击工具链}：实现比特压缩与小波压缩模块、可学习掩码优化器、特征域插值融合 pipeline，在 Google Speech Commands 公开数据集上完成端到端验证，攻击成功率 $>$ \textbf{99\%}
+\par\smallskip\hangindent=1em\textbullet\;构建\textbf{无数据后门防御框架}：基于 PyTorch 实现孪生模型训练流程，设计 EMA 动量更新与梯度自相关计算模块，支持多种攻击方法的自动化防御评估
+\\
+\\
+
+\textbf{2025.03 -- 至今} & \textbf{Valveye — 智能对话式 Steam 游戏价格助手}\\
+& {\small\color{lightgray} 技术栈：LangChain + LangGraph + OpenViking + OpenAI API + Python + aiohttp + aiosqlite} \\
+& \par\smallskip
+\par\smallskip\hangindent=1em\textbullet\;基于 LangChain + LangGraph 构建\textbf{ Supervisor + 4 Specialist 多 Agent 架构}，设计 9 个领域工具并按 Agent 分组，实现意图分解、任务路由与 Agent 间 Handoff 协作
+\par\smallskip\hangindent=1em\textbullet\;实现\textbf{ ReAct 多步推理}策略（需求理解 → 候选获取 → 深度调查 → 综合推理 → 个性化呈现），支持多轮对话记忆（AsyncSqliteSaver 异步持久化）与结构化流式事件输出
+\par\smallskip\hangindent=1em\textbullet\;集成 OpenViking \textbf{L0/L1/L2 三层渐进式记忆架构}，实现跨会话自动召回与长期记忆捕获
+\par\smallskip\hangindent=1em\textbullet\;设计\textbf{多数据源容错}机制（ITAD/SteamDB/CheapShark 三源降级），23 个区域异步并发比价（asyncio.gather）+ 实时汇率转换
+\par\smallskip\hangindent=1em\textbullet\;构建\textbf{完整 CLI 交互系统}：Rich Markdown 渲染、Agent 思考过程实时流式展示、对话持久化与多格式导出（Markdown/JSON/HTML）
+\par\smallskip\hangindent=1em\textbullet\;实现\textbf{定时价格监控}调度（APScheduler）与 7 渠道富文本消息推送（Email、Telegram、Discord、企业微信/飞书/钉钉、QQ）
+\\
+\end{tabularx}
+
+%----------------------------------------------------------------------------------------
+%	科研成果
+%----------------------------------------------------------------------------------------
+
+\section{科研成果}
+
+\vspace{2pt}
+\begin{enumerate}[leftmargin=*, after=\strut, label={[\arabic*]}]
+
+    \item \textbf{CBA: Backdoor Attack on Deep Speech Classification via Audio Compression}\\
+    {\small \textbf{一作} \quad CCF-B \quad 已发表 \quad Proc. Interspeech 2025}
+
+    \item \textbf{Breaking the Symmetry: Momentum Siamese Paradigm for Data-Free Proactive Backdoor Defense}\\
+    {\small \textbf{一作} \quad CCF-A / SCI 一区 \quad 在审 \quad IEEE TIFS}
+
+    \item \textbf{Breaking Ultra-Low Poisoning Ratio Barrier: Sample Selection for Backdoor Boundary Deconstruction}\\
+    {\small \textbf{一作} \quad CCF-A / SCI 一区 \quad 在审 \quad IEEE TIFS}
+
+    \item \textbf{From Compression to Trigger: Inaudible Backdoor Attack for Keyword Recognition System}\\
+    {\small \textbf{一作} \quad SCI 四区 \quad 已录用 \quad IJAACS, 2026}
+
+    \item \textbf{Amplifying Discriminative Distortions: A Generative Latent Feature Reinforcement Framework for Audio Spoofing Detection}\\
+    {\small 三作 \quad CCF-C / SCI 二区 \quad 已发表 \quad ESWA, 2025}
+
+    \item \textbf{DyMEvalNet: Dynamic Text-Audio-Personalization Fusion for Multimodal Music Quality Assessment}\\
+    {\small 三作 \quad CCF-C \quad 已发表 \quad Proc. ASRU 2025}
+
+    \item \textbf{Fine-Grained Feature Learning for Audio Deepfake Detection via Auxiliary Source Tracing Task}\\
+    {\small 四作 \quad CCF-A / SCI 一区 \quad 在审 \quad IEEE TIFS}
+
+    \item \textbf{Ouroboros: Self-Referential Backdoor Attacks on Speech Enhancement via Clean Audio Triggers}\\
+    {\small 二作 \quad CCF-B \quad 在审 \quad Proc. Interspeech 2026}
+
+    \item \textbf{Benign Backdoor for Active Speaker Protection in One-Shot Voice Conversion}\\
+    {\small 二作 \quad CCF-B \quad 在审 \quad Proc. Interspeech 2026}
+
+    \item \textbf{CAQA-Net: Continual Audio Quality Assessment Across Speech and Music Domains}\\
+    {\small 三作 \quad CCF-B \quad 在审 \quad Proc. Interspeech 2026}
+\end{enumerate}
+\end{document}

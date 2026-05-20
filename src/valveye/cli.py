@@ -1200,7 +1200,7 @@ async def _run(args: argparse.Namespace) -> int:
                     total_deals = result.at_low + result.new_low
                     if total_deals > 0:
                         console.print(
-                            f"  [green]✓[/] {result.total}个游戏中"
+                            f" [green]✓[/] {result.total}个游戏中"
                             f" [bold]{result.at_low}[/]个史低"
                             f" [bold red]{result.new_low}[/]个新史低"
                             "  [dim]Ctrl+D 查看详情[/]"
