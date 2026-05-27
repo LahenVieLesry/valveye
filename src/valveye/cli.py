@@ -291,9 +291,10 @@ def _history_path() -> Path:
     return p / "history"
 
 
-def _build_toolbar(thread_id: str, turn_count: int, chat_store: ChatStore, state: list):
+def _build_toolbar(thread_id: str, turn_count_ref: list[int], chat_store: ChatStore, state: list):
     """Build a bottom_toolbar callable for PromptSession.
 
+    turn_count_ref: mutable list where [0] holds the current turn count.
     state[0] = timestamp when hint should be shown (0 = no hint).
     state[1] = _StartupDealResult or None (startup deal check result).
     state[2] = timestamp when deal result was set (0 = no result).
@@ -305,7 +306,7 @@ def _build_toolbar(thread_id: str, turn_count: int, chat_store: ChatStore, state
         parts = [
             ("class:toolbar", f" {title} "),
             ("class:toolbar", f" · {model} "),
-            ("class:toolbar", f" · 第{turn_count}轮 "),
+            ("class:toolbar", f" · 第{turn_count_ref[0]}轮 "),
         ]
 
         # Show deal check result in toolbar for 10 seconds
@@ -552,18 +553,6 @@ def _show_model_info() -> None:
     console.print()
 
 
-def _print_tool_call(raw: str) -> None:
-    """Format a tool-call marker line:  ⚙ 查询价格 → The Bazaar"""
-    inner = raw.strip().removeprefix("[调用工具:").removesuffix("]").strip()
-    name = inner.split("(")[0].strip() if "(" in inner else inner
-    args_part = inner[len(name):].strip().strip("()")
-    display_name = _TOOL_DISPLAY.get(name, name)
-    if args_part:
-        console.print(f"  [blue]⚙[/]  [dim]{display_name}[/] [dim cyan]→ {args_part}[/]")
-    else:
-        console.print(f"  [blue]⚙[/]  [dim]{display_name}[/]")
-
-
 def _print_thinking_panel(thinking_text: str, fold_state: str) -> None:
     """Render the thinking panel in folded or unfolded state."""
     if not thinking_text:
@@ -592,29 +581,28 @@ def _print_thinking_panel(thinking_text: str, fold_state: str) -> None:
         )
 
 
-def _render_turn(thinking_text: str, fold_state: str, tool_parts: list[str], response_text: str) -> Group:
+def _render_turn(thinking_text: str, fold_state: str, tool_calls: list[dict], response_text: str) -> Group:
     """Build a Rich renderable for the full agent turn."""
     items = []
     if thinking_text:
         items.append(_build_thinking_panel(thinking_text, fold_state))
-    for raw in tool_parts:
-        items.append(_build_tool_call(raw))
+    for tc in tool_calls:
+        display_name = _TOOL_DISPLAY.get(tc["name"], tc["name"])
+        game = tc.get("inputs", {}).get("game", "") if tc.get("inputs") else ""
+        if game:
+            items.append(Text(f"  ⚙  {display_name} → {game}", style="dim"))
+        else:
+            items.append(Text(f"  ⚙  {display_name}", style="dim"))
+        if tc.get("output"):
+            summary = _summarize_tool_result(tc["output"])
+            if summary:
+                items.append(Text(f"    {summary}", style="dim"))
     if response_text:
         items.append(Text(""))
         items.append(Markdown(response_text))
     items.append(Text(""))
     items.append(Text("  (T) 展开/折叠 · (Enter) 继续", style="dim"))
     return Group(*items)
-
-
-def _build_tool_call(raw: str) -> Text:
-    inner = raw.strip().removeprefix("[调用工具:").removesuffix("]").strip()
-    name = inner.split("(")[0].strip() if "(" in inner else inner
-    args_part = inner[len(name):].strip().strip("()")
-    display_name = _TOOL_DISPLAY.get(name, name)
-    if args_part:
-        return Text(f"  ⚙  {display_name} → {args_part}", style="dim")
-    return Text(f"  ⚙  {display_name}", style="dim")
 
 
 def _summarize_tool_result(raw: str) -> str:
@@ -673,8 +661,9 @@ async def _run_agent_turn(
 
     thinking_parts: list[str] = []
     response_parts: list[str] = []
-    tool_calls: list[dict] = []    # {"name": ..., "inputs": ..., "output": ...}
+    tool_calls: list[dict] = []    # {"id": ..., "name": ..., "inputs": ..., "output": ...}
     thinking_done = False
+    _tool_id_counter = 0
     current_agent_label = ""
 
     def _live_group() -> Group:
@@ -731,7 +720,9 @@ async def _run_agent_turn(
 
             elif etype == "tool_start":
                 thinking_done = True
+                _tool_id_counter += 1
                 tool_calls.append({
+                    "id": _tool_id_counter,
                     "name": event["name"],
                     "inputs": event.get("inputs", {}),
                     "output": "",
@@ -739,8 +730,8 @@ async def _run_agent_turn(
                 live.update(_live_group())
 
             elif etype == "tool_end":
-                # Find the matching tool call and set its output
-                for tc in reversed(tool_calls):
+                # Find the first unmatched tool call with this name
+                for tc in tool_calls:
                     if tc["name"] == event["name"] and not tc["output"]:
                         tc["output"] = event.get("output", "")
                         break
@@ -781,7 +772,7 @@ async def _run_agent_turn(
     # ── Phase 3: fold toggle ─────────────────────────────────────────────
     if thinking_text:
         with Live(
-            _render_turn(thinking_text, fold_state, [], response_text),
+            _render_turn(thinking_text, fold_state, tool_calls, response_text),
             console=console,
             refresh_per_second=4,
             transient=False,
@@ -799,7 +790,7 @@ async def _run_agent_turn(
                 if key.strip().lower() == "t":
                     fold_state = "unfolded" if fold_state == "folded" else "folded"
                     live.update(
-                        _render_turn(thinking_text, fold_state, [], response_text)
+                        _render_turn(thinking_text, fold_state, tool_calls, response_text)
                     )
                     continue
                 break
@@ -996,11 +987,14 @@ def _start_openviking_server() -> subprocess.Popen | None:
     global _OV_SERVER_PROC
     python_bin = sys.executable
     try:
+        popen_kwargs: dict = {}
+        if sys.platform != "win32":
+            popen_kwargs["preexec_fn"] = os.setsid  # new process group for clean shutdown
         proc = subprocess.Popen(
             [python_bin, "-m", "openviking.server.bootstrap"],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
-            preexec_fn=os.setsid,  # create new process group for clean shutdown
+            **popen_kwargs,
         )
         _OV_SERVER_PROC = proc
         return proc
@@ -1009,25 +1003,31 @@ def _start_openviking_server() -> subprocess.Popen | None:
         return None
 
 
-def _stop_openviking_server() -> None:
+async def _stop_openviking_server() -> None:
     """Stop the openviking-server subprocess if we started it."""
     global _OV_SERVER_PROC
     if _OV_SERVER_PROC is None:
         return
+    proc = _OV_SERVER_PROC
+    _OV_SERVER_PROC = None
     try:
-        os.killpg(os.getpgid(_OV_SERVER_PROC.pid), signal.SIGTERM)
-        _OV_SERVER_PROC.wait(timeout=5)
+        if sys.platform != "win32":
+            os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+        else:
+            proc.terminate()
+        await asyncio.wait_for(asyncio.to_thread(proc.wait), timeout=5)
     except ProcessLookupError:
         pass
-    except subprocess.TimeoutExpired:
+    except (asyncio.TimeoutError, subprocess.TimeoutExpired):
         try:
-            os.killpg(os.getpgid(_OV_SERVER_PROC.pid), signal.SIGKILL)
+            if sys.platform != "win32":
+                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+            else:
+                proc.kill()
         except ProcessLookupError:
             pass
     except Exception:
         pass
-    finally:
-        _OV_SERVER_PROC = None
 
 
 def build_services():
@@ -1126,6 +1126,7 @@ async def _run(args: argparse.Namespace) -> int:
     # ── chat ──────────────────────────────────────────────────────────────
     if args.command == "chat":
         all_tools, tool_groups = tools
+        checkpointer_conn = None
         agent, checkpointer_conn = await build_multi_agent(tool_groups, get_game_details_fn=tool_groups["info"][0])
         chat_store = ChatStore()
         thread_id = chat_store.create_thread()
@@ -1147,7 +1148,7 @@ async def _run(args: argparse.Namespace) -> int:
                             break
                     else:
                         console.print("  [yellow]⚠[/] OpenViking Server 启动超时")
-                        _stop_openviking_server()
+                        await _stop_openviking_server()
                         _ov_started_by_us = False
 
             memory = VikingMemory()
@@ -1161,7 +1162,7 @@ async def _run(args: argparse.Namespace) -> int:
                 await memory.close()
                 memory = None
                 if _ov_started_by_us:
-                    _stop_openviking_server()
+                    await _stop_openviking_server()
                     _ov_started_by_us = False
 
         try:
@@ -1173,7 +1174,7 @@ async def _run(args: argparse.Namespace) -> int:
 
             # interactive mode
             _show_welcome()
-            turn_count = 0
+            turn_count_ref = [0]
             fold_state = "folded"
             # [0] = hint show timestamp, [1] = deal result, [2] = deal result timestamp
             toolbar_state = [0.0, None, 0.0]
@@ -1185,7 +1186,7 @@ async def _run(args: argparse.Namespace) -> int:
                     history=FileHistory(str(_history_path())),
                     completer=_SlashCommandCompleter(),
                     key_bindings=kb,
-                    bottom_toolbar=_build_toolbar(thread_id, turn_count, chat_store, toolbar_state),
+                    bottom_toolbar=_build_toolbar(thread_id, turn_count_ref, chat_store, toolbar_state),
                     style=_PROMPT_STYLE,
                 )
 
@@ -1241,14 +1242,14 @@ async def _run(args: argparse.Namespace) -> int:
                         console.print("  [dim]输入已清空[/]")
                     elif result == "__new__":
                         thread_id = chat_store.create_thread()
-                        turn_count = 0
+                        turn_count_ref[0] = 0
                         fold_state = "folded"
                         if memory:
                             await memory.create_session(thread_id)
                         console.print("  [green]✓[/] 已创建新对话")
                     elif result:
                         thread_id = result
-                        turn_count = 0
+                        turn_count_ref[0] = 0
                         fold_state = "folded"
                         if memory:
                             await memory.create_session(thread_id)
@@ -1271,12 +1272,12 @@ async def _run(args: argparse.Namespace) -> int:
 
                 if user_input.startswith("/"):
                     result, fold_state, new_tid = await _handle_slash_command(
-                        user_input, agent, thread_id, turn_count, fold_state,
+                        user_input, agent, thread_id, turn_count_ref[0], fold_state,
                         chat_store=chat_store, memory=memory,
                     )
                     if result is None:
                         break
-                    turn_count = result
+                    turn_count_ref[0] = result
                     if new_tid is not None:
                         thread_id = new_tid
                     continue
@@ -1284,8 +1285,8 @@ async def _run(args: argparse.Namespace) -> int:
                 # Log user message
                 chat_store.append_message(thread_id, "user", user_input)
 
-                turn_count, fold_state = await _run_agent_turn(
-                    agent, user_input, thread_id, turn_count, fold_state,
+                turn_count_ref[0], fold_state = await _run_agent_turn(
+                    agent, user_input, thread_id, turn_count_ref[0], fold_state,
                     chat_store=chat_store, memory=memory,
                 )
 
@@ -1295,8 +1296,9 @@ async def _run(args: argparse.Namespace) -> int:
                 await memory.close()
             if _ov_started_by_us:
                 console.print("  [dim]⏹ 正在关闭 OpenViking Server…[/]")
-                _stop_openviking_server()
-            await checkpointer_conn.close()
+                await _stop_openviking_server()
+            if checkpointer_conn is not None:
+                await checkpointer_conn.close()
             await game_data.close()
             await price_service.close()
             await notifier.close()

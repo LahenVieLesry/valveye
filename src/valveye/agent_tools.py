@@ -156,7 +156,10 @@ def build_tools(price_service: PriceService, recommender: Recommender, game_data
         user_query 为玩家的原始输入（用于自动检测区域），region/currency 留空时自动检测。"""
         if not region or not currency:
             region, currency = _detect_region(user_query or game)
-        channels = json.loads(channels_json)
+        try:
+            channels = json.loads(channels_json)
+        except json.JSONDecodeError as e:
+            return f"通知渠道格式错误: {e}。正确格式示例: [{{\"type\":\"email\",\"to\":\"user@example.com\"}}]"
         sub_id, created = repo.add(
             user_id=user_id,
             game_query=game,
@@ -191,7 +194,7 @@ def build_tools(price_service: PriceService, recommender: Recommender, game_data
     def request_game_details(games: str) -> str:
         """搜索候选后，请求详情专家获取游戏详细信息。
         games: 逗号分隔的英文游戏名，如 "Hades, Dead Cells, Slay the Spire"。"""
-        return f"[HANDOFF_REQUEST:get_details:{games}]"
+        return f"正在为您获取以下游戏的详细信息: {games}，请稍候…"
 
     all_tools = [query_low_price, compare_prices, search_similar_candidates, get_game_details, get_game_reviews, recommend_similar_games, subscribe_game, list_subscriptions, request_game_details]
 

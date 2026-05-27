@@ -33,6 +33,7 @@ class SupervisorState(TypedDict):
     accumulated_context: dict[str, str]
     iteration_count: int
     original_query: str
+    handoff_pending: bool
 
 
 # ── LLM builder ───────────────────────────────────────────────────────────
@@ -48,11 +49,6 @@ def build_llm() -> ChatOpenAI:
     return ChatOpenAI(**kwargs)
 
 
-# ── Handoff marker ────────────────────────────────────────────────────────
-
-_HANDOFF_PATTERN = re.compile(r"\[HANDOFF_REQUEST:(\w+):([^\]]+)\]")
-
-
 # ── Multi-agent graph builder ─────────────────────────────────────────────
 
 async def build_multi_agent(
@@ -62,27 +58,27 @@ async def build_multi_agent(
     """Build the Supervisor + Specialist multi-agent graph."""
     llm = build_llm()
 
-    # --- Build specialist agents as compiled subgraphs ---
+    # --- Build specialist agents as compiled subgraphs (share one LLM) ---
     price_agent = create_agent(
-        model=build_llm(),
+        model=llm,
         tools=tool_groups["price"],
         system_prompt=PRICE_AGENT_PROMPT,
         name="price_agent",
     )
     info_agent = create_agent(
-        model=build_llm(),
+        model=llm,
         tools=tool_groups["info"],
         system_prompt=INFO_AGENT_PROMPT,
         name="info_agent",
     )
     recommend_agent = create_agent(
-        model=build_llm(),
+        model=llm,
         tools=tool_groups["recommend"],
         system_prompt=RECOMMEND_AGENT_PROMPT,
         name="recommend_agent",
     )
     subs_agent = create_agent(
-        model=build_llm(),
+        model=llm,
         tools=tool_groups["subs"],
         system_prompt=SUBS_AGENT_PROMPT,
         name="subs_agent",
@@ -99,9 +95,18 @@ async def build_multi_agent(
         if not messages:
             return {"active_agent": "info", "task_queue": [{"agent": "info", "query": ""}], "current_task_index": 0}
 
-        last_msg = messages[-1]
-        raw_content = last_msg.content if hasattr(last_msg, "content") else str(last_msg)
-        content = raw_content if isinstance(raw_content, str) else str(raw_content)
+        # Build context from last 3 messages for follow-up awareness
+        context_parts = []
+        for msg in messages[-3:]:
+            raw = msg.content if hasattr(msg, "content") else str(msg)
+            text = raw if isinstance(raw, str) else str(raw)
+            if isinstance(msg, HumanMessage):
+                context_parts.append(f"[用户]: {text}")
+            elif isinstance(msg, AIMessage):
+                # Only include short preview to avoid token bloat
+                preview = text[:200] + ("…" if len(text) > 200 else "")
+                context_parts.append(f"[助手]: {preview}")
+        content = "\n".join(context_parts) if context_parts else str(messages[-1].content)
 
         result = await router_llm.ainvoke([
             SystemMessage(content=SUPERVISOR_PROMPT),
@@ -110,9 +115,11 @@ async def build_multi_agent(
         raw = result.content if isinstance(result.content, str) else str(result.content)
 
         # Parse JSON: {"tasks": [{"agent": "price", "query": "..."}, ...]}
+        # Strip markdown code fences if present
+        cleaned = re.sub(r'```(?:json)?\s*', '', raw).strip('` \n')
         task_queue: list[dict] = []
         try:
-            json_match = re.search(r'\{.*\}', raw, re.DOTALL)
+            json_match = re.search(r'\{.*\}', cleaned, re.DOTALL)
             if json_match:
                 data = _json.loads(json_match.group())
                 tasks = data.get("tasks", [])
@@ -156,6 +163,9 @@ async def build_multi_agent(
         idx = state.get("current_task_index", 0)
         if queue and idx < len(queue):
             task = queue[idx]
+            # After handoff, game details are already in messages — skip re-injection
+            if state.get("handoff_pending"):
+                return {"active_agent": task["agent"], "handoff_pending": False}
             return {
                 "messages": [HumanMessage(content=task["query"])],
                 "active_agent": task["agent"],
@@ -170,39 +180,43 @@ async def build_multi_agent(
         queue = state.get("task_queue", [])
         idx = state.get("current_task_index", 0)
 
-        # Scan recent messages for handoff markers
+        # Detect handoff by checking AIMessage.tool_calls for request_game_details
         for msg in reversed(messages[-5:]):
-            raw = msg.content if hasattr(msg, "content") else str(msg)
-            content = raw if isinstance(raw, str) else str(raw)
-            match = _HANDOFF_PATTERN.search(content)
-            if match:
-                req_type, req_data = match.group(1), match.group(2)
-                games = [g.strip() for g in req_data.split(",")]
+            if isinstance(msg, AIMessage) and hasattr(msg, "tool_calls") and msg.tool_calls:
+                for tc in msg.tool_calls:
+                    if tc.get("name") == "request_game_details":
+                        games_str = tc.get("args", {}).get("games", "")
+                        games = [g.strip() for g in games_str.split(",") if g.strip()]
+                        if not games:
+                            break
 
-                if req_type == "get_details":
-                    details_parts = []
-                    for game in games:
-                        cache_key = f"game_details:{game}"
-                        if cache_key not in accumulated:
-                            try:
-                                result = await get_game_details_fn.ainvoke({"game": game})
-                                accumulated[cache_key] = result
-                            except Exception as e:
-                                result = f"获取失败: {e}"
-                                accumulated[cache_key] = result
-                            details_parts.append(f"--- {game} ---\n{result}")
-                        else:
-                            details_parts.append(f"--- {game} ---\n{accumulated[cache_key]}")
+                        details_parts = []
+                        for game in games:
+                            cache_key = f"game_details:{game}"
+                            error_key = f"error:game_details:{game}"
+                            # Return cached success, but retry on cached errors
+                            if cache_key in accumulated and error_key not in accumulated:
+                                details_parts.append(f"--- {game} ---\n{accumulated[cache_key]}")
+                            else:
+                                try:
+                                    result = await get_game_details_fn.ainvoke({"game": game})
+                                    accumulated[cache_key] = result
+                                    accumulated.pop(error_key, None)
+                                except Exception as e:
+                                    result = f"获取失败: {e}"
+                                    accumulated[error_key] = result
+                                details_parts.append(f"--- {game} ---\n{result}")
 
-                    context_msg = AIMessage(
-                        content="[系统注入的游戏详情]\n\n" + "\n\n".join(details_parts),
-                    )
-                    return {
-                        "messages": [context_msg],
-                        "accumulated_context": accumulated,
-                        "active_agent": "recommend",
-                        "iteration_count": iteration,
-                    }
+                        context_msg = AIMessage(
+                            content="[系统注入的游戏详情]\n\n" + "\n\n".join(details_parts),
+                        )
+                        return {
+                            "messages": [context_msg],
+                            "accumulated_context": accumulated,
+                            "active_agent": "recommend",
+                            "iteration_count": iteration,
+                            "handoff_pending": True,
+                        }
                 break
 
         # No handoff — advance to next task in queue
@@ -219,11 +233,12 @@ async def build_multi_agent(
         return {
             "iteration_count": iteration,
             "active_agent": "finish",
+            "accumulated_context": accumulated,
         }
 
     def route_after_post_process(state: SupervisorState) -> str:
         """Decide next step after post-processing."""
-        if state.get("iteration_count", 0) >= 10:
+        if state.get("iteration_count", 0) >= 20:
             return "__end__"
 
         active = state.get("active_agent", "finish")
@@ -292,6 +307,16 @@ async def build_multi_agent(
 _AGENT_NAMES = {"price_agent", "info_agent", "recommend_agent", "subs_agent"}
 
 
+async def _enhance_with_memory(message: str, thread_id: str, memory: VikingMemory | None) -> str:
+    """Enhance message with memory recall context."""
+    if not memory:
+        return message
+    ctx = await memory.recall(query=message, session_id=thread_id)
+    if ctx:
+        return f"[相关记忆]\n{ctx}\n\n[用户消息]\n{message}"
+    return message
+
+
 async def stream_turn(
     agent, message: str, thread_id: str, memory: VikingMemory | None = None,
 ) -> AsyncIterator[dict]:
@@ -307,11 +332,7 @@ async def stream_turn(
     """
     config = {"configurable": {"thread_id": thread_id}, "recursion_limit": 20}
 
-    enhanced = message
-    if memory:
-        ctx = await memory.recall(query=message, session_id=thread_id)
-        if ctx:
-            enhanced = f"[相关记忆]\n{ctx}\n\n[用户消息]\n{message}"
+    enhanced = await _enhance_with_memory(message, thread_id, memory)
 
     current_agent = ""
     collected: list[str] = []
@@ -351,6 +372,8 @@ async def stream_turn(
                 output = str(output_obj.content)
             else:
                 output = str(output_obj)
+            if len(output) > 500:
+                output = output[:500] + "…"
             yield {"type": "tool_end", "name": event.get("name", ""), "output": output}
 
         elif kind == "on_tool_error" and current_agent:
@@ -374,11 +397,7 @@ async def run_single_turn(
 ) -> str:
     config = {"configurable": {"thread_id": thread_id}, "recursion_limit": 20}
 
-    enhanced = message
-    if memory:
-        ctx = await memory.recall(query=message, session_id=thread_id)
-        if ctx:
-            enhanced = f"[相关记忆]\n{ctx}\n\n[用户消息]\n{message}"
+    enhanced = await _enhance_with_memory(message, thread_id, memory)
 
     result = await agent.ainvoke(
         {"messages": [HumanMessage(content=enhanced)]},
