@@ -38,7 +38,7 @@ valveye-mcp = "valveye.mcp_server:main"
 
 [build-system]
 requires = ["setuptools>=68.0"]
-build-backend = "setuptools.backends._legacy:_Backend"
+build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
 where = ["src"]
@@ -46,9 +46,12 @@ where = ["src"]
 [tool.ruff]
 target-version = "py310"
 line-length = 120
-select = ["E", "F", "W", "I", "UP", "B", "SIM", "RUF"]
 
-[tool.ruff.per-file-ignores]
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "SIM", "RUF"]
+ignore = ["RUF001", "RUF002", "RUF003"]
+
+[tool.ruff.lint.per-file-ignores]
 "tests/*" = ["B"]
 
 [tool.mypy]

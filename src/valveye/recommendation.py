@@ -18,11 +18,10 @@ from valveye.config import settings
 from valveye.domain import GameProfile, RecommendationItem, RecommendationReason
 from valveye.game_data import (
     GameDataService,
-    _merge_tags,
     _extract_display_tags,
     _extract_relevance_tags,
     _extract_tags_from_steamspy,
-    is_feature_tag as _is_feature_tag,
+    _merge_tags,
 )
 
 _YEAR_RE = re.compile(r"\b(19|20)\d{2}\b")

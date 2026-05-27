@@ -28,12 +28,12 @@ from valveye.agent import build_multi_agent, run_single_turn, stream_turn
 from valveye.agent_tools import build_tools
 from valveye.chat_store import ChatStore
 from valveye.config import settings
-from valveye.memory import VikingMemory
 from valveye.data_sources.cheapshark import CheapSharkSource
 from valveye.data_sources.itad import ITADSource
 from valveye.data_sources.steamdb import SteamDBSource
 from valveye.formatter import build_notification
 from valveye.game_data import GameDataService
+from valveye.memory import VikingMemory
 from valveye.notifications import Notifier
 from valveye.pricing import PriceService
 from valveye.recommendation import Recommender
@@ -94,7 +94,7 @@ _AGENT_DISPLAY: dict[str, str] = {
 class _SlashCommandCompleter(Completer):
     """Completer that shows a command palette with descriptions when typing /."""
 
-    def get_completions(self, document, complete_event):  # noqa: ARG002
+    def get_completions(self, document, complete_event):
         text = document.text_before_cursor
         if not text.startswith("/"):
             return
@@ -197,8 +197,8 @@ def _build_keybindings(deals_state: list | None = None) -> KeyBindings:
 
 def _read_key() -> str:
     """Read a single keypress, returning escape sequences for special keys."""
-    import tty
     import termios
+    import tty
     fd = sys.stdin.fileno()
     old = termios.tcgetattr(fd)
     try:
@@ -972,12 +972,11 @@ async def _is_openviking_running() -> bool:
     import aiohttp
     url = settings.openviking_url.rstrip("/")
     try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get(
-                f"{url}/health",
-                timeout=aiohttp.ClientTimeout(total=2),
-            ) as resp:
-                return resp.status == 200
+        async with aiohttp.ClientSession() as session, session.get(
+            f"{url}/health",
+            timeout=aiohttp.ClientTimeout(total=2),
+        ) as resp:
+            return resp.status == 200
     except Exception:
         return False
 
@@ -1196,7 +1195,7 @@ async def _run(args: argparse.Namespace) -> int:
                     console.print("  [dim]🔍 正在检查订阅游戏优惠…[/]")
                     result = await _run_startup_deal_check(repo, price_service, notifier, game_data)
                     if result.total == 0:
-                        console.print(f"  [green]✓[/] 暂未订阅游戏！")
+                        console.print("  [green]✓[/] 暂未订阅游戏！")
                         return
                     total_deals = result.at_low + result.new_low
                     if total_deals > 0:

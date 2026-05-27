@@ -7,7 +7,6 @@ from __future__ import annotations
 
 from valveye.prompt_manager import get_prompt_manager
 
-
 # ── 共享规则（注入到每个 Specialist 提示词中）───────────────────────────────
 
 SHARED_RULES = """\

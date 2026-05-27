@@ -6,8 +6,8 @@ import aiohttp
 import certifi
 
 from valveye.config import settings
-from valveye.domain import PriceSnapshot
 from valveye.data_sources.base import PriceSource
+from valveye.domain import PriceSnapshot
 
 
 class SteamDBSource(PriceSource):
@@ -25,14 +25,13 @@ class SteamDBSource(PriceSource):
         timeout = aiohttp.ClientTimeout(total=12)
         ssl_ctx = ssl.create_default_context(cafile=certifi.where())
         connector = aiohttp.TCPConnector(ssl=ssl_ctx)
-        async with aiohttp.ClientSession(timeout=timeout, connector=connector) as session:
-            async with session.get(
-                f"{settings.steamdb_api_base.rstrip('/')}/price",
-                params={"q": game_query, "cc": region.lower(), "currency": currency.upper()},
-            ) as resp:
-                if resp.status >= 400:
-                    return None
-                payload = await resp.json()
+        async with aiohttp.ClientSession(timeout=timeout, connector=connector) as session, session.get(
+            f"{settings.steamdb_api_base.rstrip('/')}/price",
+            params={"q": game_query, "cc": region.lower(), "currency": currency.upper()},
+        ) as resp:
+            if resp.status >= 400:
+                return None
+            payload = await resp.json()
 
         if not isinstance(payload, dict):
             return None

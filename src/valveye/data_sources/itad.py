@@ -7,8 +7,8 @@ import aiohttp
 import certifi
 
 from valveye.config import settings
-from valveye.domain import PriceSnapshot
 from valveye.data_sources.base import PriceSource
+from valveye.domain import PriceSnapshot
 
 
 class ITADSource(PriceSource):

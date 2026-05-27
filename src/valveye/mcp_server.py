@@ -26,7 +26,7 @@ _services: dict[str, Any] = {}
 
 def _get_services() -> dict[str, Any]:
     if not _services:
-        repo, price_service, recommender, scheduler, tools, game_data, notifier = build_services()
+        repo, price_service, recommender, _scheduler, tools, game_data, _notifier = build_services()
         all_tools, tool_groups = tools
         _services["repo"] = repo
         _services["price_service"] = price_service
@@ -42,12 +42,18 @@ async def list_tools() -> list[Tool]:
     return [
         Tool(
             name="query_game_price",
-            description="Query current and historical low price for a Steam game. Returns price, currency, and whether it's at historical low.",
+            description=(
+                "Query current and historical low price for a Steam game."
+                " Returns price, currency, and whether it's at historical low."
+            ),
             inputSchema={
                 "type": "object",
                 "properties": {
                     "game": {"type": "string", "description": "Game name (Steam official English name)"},
-                    "window": {"type": "string", "enum": ["all", "12m", "3m"], "default": "all", "description": "Time window for historical low"},
+                    "window": {
+                        "type": "string", "enum": ["all", "12m", "3m"],
+                        "default": "all", "description": "Time window for historical low",
+                    },
                 },
                 "required": ["game"],
             },
@@ -59,14 +65,20 @@ async def list_tools() -> list[Tool]:
                 "type": "object",
                 "properties": {
                     "game": {"type": "string", "description": "Game name (Steam official English name)"},
-                    "target_currency": {"type": "string", "default": "", "description": "Target currency (auto-detected if empty)"},
+                    "target_currency": {
+                        "type": "string", "default": "",
+                        "description": "Target currency (auto-detected if empty)",
+                    },
                 },
                 "required": ["game"],
             },
         ),
         Tool(
             name="recommend_similar_games",
-            description="Find games similar to a given game using multi-signal analysis (tags, Steam recommendations, review quality).",
+            description=(
+                "Find games similar to a given game using multi-signal analysis"
+                " (tags, Steam recommendations, review quality)."
+            ),
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -78,7 +90,10 @@ async def list_tools() -> list[Tool]:
         ),
         Tool(
             name="get_game_info",
-            description="Get detailed game information including description, tags, developer, release date, and review statistics.",
+            description=(
+                "Get detailed game information including description, tags,"
+                " developer, release date, and review statistics."
+            ),
             inputSchema={
                 "type": "object",
                 "properties": {

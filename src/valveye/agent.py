@@ -3,7 +3,8 @@ from __future__ import annotations
 import json as _json
 import operator
 import re
-from typing import Annotated, Any, AsyncIterator, TypedDict
+from collections.abc import AsyncIterator
+from typing import Annotated, Any, TypedDict
 
 import aiosqlite
 from langchain.agents import create_agent

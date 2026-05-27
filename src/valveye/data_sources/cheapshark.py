@@ -1,15 +1,14 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
-
 import ssl
+from datetime import datetime, timezone
 
 import aiohttp
 import certifi
 
 from valveye.config import settings
-from valveye.domain import PriceSnapshot
 from valveye.data_sources.base import PriceSource
+from valveye.domain import PriceSnapshot
 
 
 class CheapSharkSource(PriceSource):

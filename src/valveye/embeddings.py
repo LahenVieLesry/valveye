@@ -11,14 +11,15 @@ from valveye.config import settings
 
 if TYPE_CHECKING:
     import numpy as np
+
     from valveye.domain import GameProfile
 
 
 def _lazy_import():
     """Lazy import to avoid hard dependency."""
     try:
-        from sentence_transformers import SentenceTransformer
         import numpy as np
+        from sentence_transformers import SentenceTransformer
         return SentenceTransformer, np
     except ImportError:
         return None, None

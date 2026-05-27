@@ -157,12 +157,12 @@ def render_email_html(msg: NotificationMessage) -> str:
 
     parts: list[str] = []
     parts.append("<!DOCTYPE html><html><head><meta charset='utf-8'></head><body>")
-    parts.append(f"<div style='max-width:600px;margin:0 auto;font-family:-apple-system,BlinkMacSystemFont,Segoe UI,Roboto,sans-serif;color:#333;'>")
+    parts.append("<div style='max-width:600px;margin:0 auto;font-family:-apple-system,BlinkMacSystemFont,Segoe UI,Roboto,sans-serif;color:#333;'>")
 
     if msg.thumbnail:
         parts.append(f"<img src='{msg.thumbnail}' style='width:100%;border-radius:8px 8px 0 0;' alt='cover'>")
 
-    parts.append(f"<div style='padding:20px;border:1px solid #e0e0e0;border-top:none;border-radius:0 0 8px 8px;'>")
+    parts.append("<div style='padding:20px;border:1px solid #e0e0e0;border-top:none;border-radius:0 0 8px 8px;'>")
     parts.append(f"<h2 style='margin:0 0 8px;color:{accent};'>{_esc_html(msg.title)}</h2>")
 
     if msg.profile and msg.profile.description:

@@ -126,9 +126,9 @@ def _detect_system_region() -> tuple[str, str] | None:
                     result = _TZ_TO_REGION.get(zone_key)
                     if result:
                         return result
-        except Exception:  # noqa: BLE001
+        except Exception:
             pass
-    except Exception:  # noqa: BLE001
+    except Exception:
         pass
 
     return None
@@ -461,7 +461,7 @@ class PriceService:
                 if result is not None:
                     result.app_id = app_id
                     return result
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:
                 last_exc = exc
                 continue
         if last_exc is not None:
