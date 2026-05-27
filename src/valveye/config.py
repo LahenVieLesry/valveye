@@ -60,6 +60,9 @@ class Settings:
     chat_db_path: str = os.getenv("CHAT_DB_PATH", "chat.db")
     subscription_db_path: str = os.getenv("SUBSCRIPTION_DB_PATH", "subscriptions.db")
 
+    use_structured_routing: bool = _as_bool(os.getenv("USE_STRUCTURED_ROUTING"), True)
+    embeddings_enabled: bool = _as_bool(os.getenv("EMBEDDINGS_ENABLED"), False)
+
     def validate(self) -> list[str]:
         """检查关键配置项，返回缺失或异常的警告列表。"""
         warnings: list[str] = []

@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "valveye": {
+      "command": "python",
+      "args": ["-m", "valveye.mcp_server"],
+      "env": {
+        "OPENAI_API_KEY": "your-key-here",
+        "ITAD_API_KEY": "your-key-here"
+      }
+    }
+  }
+}

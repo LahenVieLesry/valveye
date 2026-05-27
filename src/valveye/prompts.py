@@ -1,4 +1,12 @@
-"""Multi-agent system prompts for Valveye."""
+"""Multi-agent system prompts for Valveye.
+
+This module provides backward-compatible access to prompts.
+Prompts are loaded from YAML files in src/valveye/prompts/ via PromptManager.
+"""
+from __future__ import annotations
+
+from valveye.prompt_manager import get_prompt_manager
+
 
 # ── 共享规则（注入到每个 Specialist 提示词中）───────────────────────────────
 
@@ -19,9 +27,37 @@ SHARED_RULES = """\
 - **所有游戏数据必须来自工具返回**，不要凭记忆编造游戏信息。\
 """
 
-# ── Supervisor 路由提示词 ─────────────────────────────────────────────────
 
-SUPERVISOR_PROMPT = """\
+def _load_prompt(name: str) -> str:
+    """Load a prompt from the YAML-backed PromptManager, with SHARED_RULES injected."""
+    try:
+        pm = get_prompt_manager()
+        return pm.get(name, shared_rules=SHARED_RULES)
+    except (KeyError, Exception):
+        return ""
+
+
+# Try loading from YAML first, fallback to hardcoded
+try:
+    _pm = get_prompt_manager()
+    _loaded_supervisor = _pm.get("supervisor", shared_rules=SHARED_RULES)
+    _loaded_price = _pm.get("price_agent", shared_rules=SHARED_RULES)
+    _loaded_info = _pm.get("info_agent", shared_rules=SHARED_RULES)
+    _loaded_recommend = _pm.get("recommend_agent", shared_rules=SHARED_RULES)
+    _loaded_subs = _pm.get("subs_agent", shared_rules=SHARED_RULES)
+    _yaml_available = True
+except Exception:
+    _yaml_available = False
+
+if _yaml_available:
+    SUPERVISOR_PROMPT = _loaded_supervisor
+    PRICE_AGENT_PROMPT = _loaded_price
+    INFO_AGENT_PROMPT = _loaded_info
+    RECOMMEND_AGENT_PROMPT = _loaded_recommend
+    SUBS_AGENT_PROMPT = _loaded_subs
+else:
+    # Fallback hardcoded prompts (original content)
+    SUPERVISOR_PROMPT = """\
 你是 Valveye 多 Agent 系统的路由器。分析用户消息，将其分解为有序任务列表。
 
 ## 四个 Agent 的能力
@@ -45,9 +81,7 @@ SUPERVISOR_PROMPT = """\
 {"reasoning": "简要分析", "tasks": [{"agent": "price", "query": "查询XX的价格"}, {"agent": "subs", "query": "订阅XX的价格提醒"}]}\
 """
 
-# ── PriceAgent 提示词 ─────────────────────────────────────────────────────
-
-PRICE_AGENT_PROMPT = f"""\
+    PRICE_AGENT_PROMPT = f"""\
 你是 Valveye 的价格查询专家。你的职责是帮助玩家查询游戏价格和跨区对比。
 
 {SHARED_RULES}
@@ -66,9 +100,7 @@ PRICE_AGENT_PROMPT = f"""\
 - **不确定就问**：如果用户给出的游戏名模糊且搜索返回多个候选项，直接列出候选项让用户选择。\
 """
 
-# ── InfoAgent 提示词 ──────────────────────────────────────────────────────
-
-INFO_AGENT_PROMPT = f"""\
+    INFO_AGENT_PROMPT = f"""\
 你是 Valveye 的游戏信息专家。你的职责是为玩家详细介绍游戏和查询玩家评价。
 
 {SHARED_RULES}
@@ -112,9 +144,7 @@ INFO_AGENT_PROMPT = f"""\
    - 帮助玩家判断这些优缺点是否与其偏好匹配\
 """
 
-# ── RecommendAgent 提示词 ─────────────────────────────────────────────────
-
-RECOMMEND_AGENT_PROMPT = f"""\
+    RECOMMEND_AGENT_PROMPT = f"""\
 你是 Valveye 的游戏推荐专家。你的职责是根据玩家的偏好推荐真正适合的相似游戏。
 
 {SHARED_RULES}
@@ -160,9 +190,7 @@ RECOMMEND_AGENT_PROMPT = f"""\
 - **不要重复调用同一个工具**：如果已经查过某游戏的详情，不要再查一次。\
 """
 
-# ── SubsAgent 提示词 ──────────────────────────────────────────────────────
-
-SUBS_AGENT_PROMPT = f"""\
+    SUBS_AGENT_PROMPT = f"""\
 你是 Valveye 的订阅管理专家。你的职责是帮助玩家设置和管理游戏价格提醒订阅。
 
 {SHARED_RULES}

@@ -196,14 +196,23 @@ def build_tools(price_service: PriceService, recommender: Recommender, game_data
         games: 逗号分隔的英文游戏名，如 "Hades, Dead Cells, Slay the Spire"。"""
         return f"正在为您获取以下游戏的详细信息: {games}，请稍候…"
 
-    all_tools = [query_low_price, compare_prices, search_similar_candidates, get_game_details, get_game_reviews, recommend_similar_games, subscribe_game, list_subscriptions, request_game_details]
+    @tool
+    async def search_by_description(description: str, top_n: int = 10) -> str:
+        """根据自然语言描述搜索游戏。当用户描述想要的游戏类型但没有指定具体游戏时使用。
+        例如："类似黑魂但不那么难的游戏"、"像素风种田游戏"、"有合作模式的肉鸽卡牌"。"""
+        result = await recommender.recommend(game_query=description, top_n=top_n)
+        if not result:
+            return "未找到匹配的游戏，请尝试更具体的描述。"
+        return json.dumps(result, ensure_ascii=False)
+
+    all_tools = [query_low_price, compare_prices, search_similar_candidates, get_game_details, get_game_reviews, recommend_similar_games, subscribe_game, list_subscriptions, request_game_details, search_by_description]
 
     # 按 Agent 分组的工具列表
     tool_map = {t.name: t for t in all_tools}
     tool_groups = {
         "price": [tool_map["query_low_price"], tool_map["compare_prices"]],
         "info": [tool_map["get_game_details"], tool_map["get_game_reviews"]],
-        "recommend": [tool_map["search_similar_candidates"], tool_map["recommend_similar_games"], tool_map["request_game_details"]],
+        "recommend": [tool_map["search_similar_candidates"], tool_map["recommend_similar_games"], tool_map["request_game_details"], tool_map["search_by_description"]],
         "subs": [tool_map["subscribe_game"], tool_map["list_subscriptions"]],
     }
 

@@ -13,7 +13,9 @@ from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from langgraph.graph import END, START, StateGraph
 
 from valveye.config import settings
+from valveye.guardrails import ResponseValidator
 from valveye.memory import VikingMemory
+from valveye.metrics import MetricsCollector, TurnMetrics
 from valveye.prompts import (
     INFO_AGENT_PROMPT,
     PRICE_AGENT_PROMPT,
@@ -21,6 +23,10 @@ from valveye.prompts import (
     SUBS_AGENT_PROMPT,
     SUPERVISOR_PROMPT,
 )
+from valveye.schemas import SupervisorRouting
+from valveye.tracing import StructuredLogger, Timer, TraceEvent, new_trace_id
+
+_logger = StructuredLogger("valveye.agent")
 
 
 # ── State schema ───────────────────────────────────────────────────────────
@@ -34,6 +40,7 @@ class SupervisorState(TypedDict):
     iteration_count: int
     original_query: str
     handoff_pending: bool
+    trace_id: str
 
 
 # ── LLM builder ───────────────────────────────────────────────────────────
@@ -89,6 +96,17 @@ async def build_multi_agent(
 
     # --- Graph nodes ---
 
+    def _keyword_fallback(query: str) -> str:
+        """Keyword-based fallback when structured routing fails."""
+        q = query.lower()
+        if any(w in q for w in ("价格", "多少钱", "便宜", "price", "cost", "史低", "打折")):
+            return "price"
+        if any(w in q for w in ("推荐", "类似", "像", "recommend", "similar", "好玩")):
+            return "recommend"
+        if any(w in q for w in ("订阅", "提醒", "subscribe", "alert", "notify")):
+            return "subs"
+        return "info"
+
     async def route_supervisor(state: SupervisorState) -> dict:
         """LLM-based intent decomposition → ordered task queue."""
         messages = state["messages"]
@@ -108,43 +126,65 @@ async def build_multi_agent(
                 context_parts.append(f"[助手]: {preview}")
         content = "\n".join(context_parts) if context_parts else str(messages[-1].content)
 
-        result = await router_llm.ainvoke([
-            SystemMessage(content=SUPERVISOR_PROMPT),
-            HumanMessage(content=content),
-        ])
-        raw = result.content if isinstance(result.content, str) else str(result.content)
-
-        # Parse JSON: {"tasks": [{"agent": "price", "query": "..."}, ...]}
-        # Strip markdown code fences if present
-        cleaned = re.sub(r'```(?:json)?\s*', '', raw).strip('` \n')
+        # Try structured output first (Pydantic schema validation)
         task_queue: list[dict] = []
-        try:
-            json_match = re.search(r'\{.*\}', cleaned, re.DOTALL)
-            if json_match:
-                data = _json.loads(json_match.group())
-                tasks = data.get("tasks", [])
-                for t in tasks:
-                    agent_name = t.get("agent", "info")
-                    if agent_name in ("price", "info", "recommend", "subs"):
-                        task_queue.append({"agent": agent_name, "query": t.get("query", content)})
-        except (ValueError, TypeError):
-            pass
+        if settings.use_structured_routing:
+            try:
+                structured_router = router_llm.with_structured_output(SupervisorRouting)
+                routing: SupervisorRouting = await structured_router.ainvoke([
+                    SystemMessage(content=SUPERVISOR_PROMPT),
+                    HumanMessage(content=content),
+                ])
+                for t in routing.tasks:
+                    if t.agent in ("price", "info", "recommend", "subs"):
+                        task_queue.append({"agent": t.agent, "query": t.query or content})
+            except Exception:
+                # Structured output not supported by model, fall through
+                pass
 
-        # Fallback: single info task
+        # Fallback: regex-based JSON parsing
         if not task_queue:
-            task_queue = [{"agent": "info", "query": content}]
+            result = await router_llm.ainvoke([
+                SystemMessage(content=SUPERVISOR_PROMPT),
+                HumanMessage(content=content),
+            ])
+            raw = result.content if isinstance(result.content, str) else str(result.content)
 
-        import logging
-        logging.getLogger(__name__).info(
-            "route_supervisor: query=%r → tasks=%s", content[:50],
-            [(t["agent"], t["query"][:30]) for t in task_queue],
-        )
+            cleaned = re.sub(r'```(?:json)?\s*', '', raw).strip('` \n')
+            try:
+                json_match = re.search(r'\{.*\}', cleaned, re.DOTALL)
+                if json_match:
+                    data = _json.loads(json_match.group())
+                    tasks = data.get("tasks", [])
+                    for t in tasks:
+                        agent_name = t.get("agent", "info")
+                        if agent_name in ("price", "info", "recommend", "subs"):
+                            task_queue.append({"agent": agent_name, "query": t.get("query", content)})
+            except (ValueError, TypeError):
+                pass
+
+        # Fallback: keyword-based routing
+        if not task_queue:
+            fallback_agent = _keyword_fallback(content)
+            task_queue = [{"agent": fallback_agent, "query": content}]
+
+        trace_id = state.get("trace_id", new_trace_id())
+        _logger.emit(TraceEvent(
+            trace_id=trace_id,
+            node="route_supervisor",
+            event="routing_decision",
+            data={
+                "query": content[:100],
+                "tasks": [(t["agent"], t["query"][:50]) for t in task_queue],
+            },
+        ))
 
         return {
             "active_agent": task_queue[0]["agent"],
             "task_queue": task_queue,
             "current_task_index": 0,
             "original_query": content,
+            "trace_id": trace_id,
         }
 
     def route_to_agent(state: SupervisorState) -> str:
@@ -179,6 +219,7 @@ async def build_multi_agent(
         iteration = state.get("iteration_count", 0) + 1
         queue = state.get("task_queue", [])
         idx = state.get("current_task_index", 0)
+        trace_id = state.get("trace_id", "")
 
         # Detect handoff by checking AIMessage.tool_calls for request_game_details
         for msg in reversed(messages[-5:]):
@@ -190,22 +231,31 @@ async def build_multi_agent(
                         if not games:
                             break
 
-                        details_parts = []
-                        for game in games:
-                            cache_key = f"game_details:{game}"
-                            error_key = f"error:game_details:{game}"
-                            # Return cached success, but retry on cached errors
-                            if cache_key in accumulated and error_key not in accumulated:
-                                details_parts.append(f"--- {game} ---\n{accumulated[cache_key]}")
-                            else:
-                                try:
-                                    result = await get_game_details_fn.ainvoke({"game": game})
-                                    accumulated[cache_key] = result
-                                    accumulated.pop(error_key, None)
-                                except Exception as e:
-                                    result = f"获取失败: {e}"
-                                    accumulated[error_key] = result
-                                details_parts.append(f"--- {game} ---\n{result}")
+                        with Timer() as t:
+                            details_parts = []
+                            for game in games:
+                                cache_key = f"game_details:{game}"
+                                error_key = f"error:game_details:{game}"
+                                # Return cached success, but retry on cached errors
+                                if cache_key in accumulated and error_key not in accumulated:
+                                    details_parts.append(f"--- {game} ---\n{accumulated[cache_key]}")
+                                else:
+                                    try:
+                                        result = await get_game_details_fn.ainvoke({"game": game})
+                                        accumulated[cache_key] = result
+                                        accumulated.pop(error_key, None)
+                                    except Exception as e:
+                                        result = f"获取失败: {e}"
+                                        accumulated[error_key] = result
+                                    details_parts.append(f"--- {game} ---\n{result}")
+
+                        _logger.emit(TraceEvent(
+                            trace_id=trace_id,
+                            node="post_process",
+                            event="handoff",
+                            data={"games": games, "iteration": iteration},
+                            latency_ms=t.elapsed_ms,
+                        ))
 
                         context_msg = AIMessage(
                             content="[系统注入的游戏详情]\n\n" + "\n\n".join(details_parts),
@@ -222,6 +272,12 @@ async def build_multi_agent(
         # No handoff — advance to next task in queue
         next_idx = idx + 1
         if next_idx < len(queue):
+            _logger.emit(TraceEvent(
+                trace_id=trace_id,
+                node="post_process",
+                event="task_advance",
+                data={"from_idx": idx, "to_idx": next_idx, "next_agent": queue[next_idx]["agent"]},
+            ))
             return {
                 "current_task_index": next_idx,
                 "active_agent": queue[next_idx]["agent"],
@@ -230,6 +286,12 @@ async def build_multi_agent(
             }
 
         # All tasks done
+        _logger.emit(TraceEvent(
+            trace_id=trace_id,
+            node="post_process",
+            event="turn_complete",
+            data={"iterations": iteration, "tasks_completed": len(queue)},
+        ))
         return {
             "iteration_count": iteration,
             "active_agent": "finish",
@@ -318,7 +380,11 @@ async def _enhance_with_memory(message: str, thread_id: str, memory: VikingMemor
 
 
 async def stream_turn(
-    agent, message: str, thread_id: str, memory: VikingMemory | None = None,
+    agent,
+    message: str,
+    thread_id: str,
+    memory: VikingMemory | None = None,
+    metrics_collector: MetricsCollector | None = None,
 ) -> AsyncIterator[dict]:
     """Execute one turn, yielding structured event dicts.
 
@@ -329,13 +395,23 @@ async def stream_turn(
       {"type": "tool_start", "name": "...", "agent": "...", "inputs": {...}}
       {"type": "tool_end", "name": "...", "output": "..."}
       {"type": "agent_end", "agent": "price_agent"}
+      {"type": "trace_id", "trace_id": "..."}
     """
-    config = {"configurable": {"thread_id": thread_id}, "recursion_limit": 20}
+    trace_id = new_trace_id()
+    config = {"configurable": {"thread_id": thread_id, "trace_id": trace_id}, "recursion_limit": 20}
 
     enhanced = await _enhance_with_memory(message, thread_id, memory)
 
     current_agent = ""
     collected: list[str] = []
+    turn_metrics: TurnMetrics | None = None
+    tool_outputs: list[str] = []
+
+    if metrics_collector:
+        turn_metrics = metrics_collector.start_turn(trace_id, message)
+
+    # Emit trace_id so CLI can display it
+    yield {"type": "trace_id", "trace_id": trace_id}
 
     async for event in agent.astream_events(
         {"messages": [HumanMessage(content=enhanced)]},
@@ -350,6 +426,8 @@ async def stream_turn(
             if current_agent and current_agent != name:
                 yield {"type": "handoff", "from": current_agent, "to": name}
             current_agent = name
+            if turn_metrics:
+                metrics_collector.record_routing(turn_metrics, name)
             yield {"type": "agent_start", "agent": name}
 
         elif kind == "on_chat_model_stream" and current_agent:
@@ -374,6 +452,9 @@ async def stream_turn(
                 output = str(output_obj)
             if len(output) > 500:
                 output = output[:500] + "…"
+            if turn_metrics:
+                metrics_collector.record_tool_call(turn_metrics, event.get("name", ""), 0.0)
+            tool_outputs.append(output)
             yield {"type": "tool_end", "name": event.get("name", ""), "output": output}
 
         elif kind == "on_tool_error" and current_agent:
@@ -384,10 +465,21 @@ async def stream_turn(
             yield {"type": "agent_end", "agent": name}
             current_agent = ""
 
-    # Auto-Capture
+    # Auto-Capture and validation
     if memory and collected:
         full_response = "".join(collected)
         await memory.capture(thread_id, message, full_response)
+
+    # Response validation (hallucination guardrail)
+    if collected and tool_outputs:
+        validator = ResponseValidator()
+        full_response = "".join(collected)
+        warnings = validator.validate(full_response, tool_outputs, current_agent)
+        if warnings:
+            yield {"type": "validation_warning", "warnings": warnings}
+
+    if turn_metrics:
+        metrics_collector.end_turn(turn_metrics)
 
 
 # ── Non-streaming turn ────────────────────────────────────────────────────

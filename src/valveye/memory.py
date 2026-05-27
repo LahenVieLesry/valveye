@@ -103,6 +103,9 @@ class VikingMemory:
 
         返回格式化的记忆上下文字符串，可直接注入到 Agent 消息前缀。
         失败时返回空字符串（静默降级）。
+
+        使用相关度优先选择策略：高分记忆优先保留完整内容，
+        低分记忆按比例截断，确保在 token 预算内最大化信息密度。
         """
         if not query.strip():
             return ""
@@ -128,31 +131,49 @@ class VikingMemory:
             if not resources:
                 return ""
 
-            # 按 score 降序，逐条读取直到 token 预算耗尽
-            memories: list[str] = []
-            budget = self._token_budget
+            # Phase 1: Collect scored memories
+            scored_memories: list[tuple[float, str, str]] = []  # (score, content, uri)
             for r in resources:
-                if budget <= 0:
-                    break
                 uri = r.get("uri", "")
                 score = r.get("score", 0.0)
-                # 低于阈值的跳过
                 if score < 0.3:
                     continue
-                # 优先读 L1 overview，fallback 到 L0 abstract
                 content = await self._read_with_fallback(uri)
                 if not content:
                     continue
-                # 粗略估算 token（中文约 1.5 char/token）
-                est_tokens = len(content) // 2
-                if est_tokens > budget:
-                    # 截断到预算内
-                    max_chars = budget * 2
-                    content = content[:max_chars] + "..."
-                memories.append(f"[记忆:{uri}] (相关度:{score:.2f})\n{content}")
-                budget -= est_tokens
+                scored_memories.append((score, content, uri))
 
-            return "\n---\n".join(memories) if memories else ""
+            if not scored_memories:
+                return ""
+
+            # Sort by relevance score descending (highest first)
+            scored_memories.sort(key=lambda x: x[0], reverse=True)
+
+            # Phase 2: Select memories within token budget
+            # High-relevance memories get full inclusion;
+            # lower-relevance memories get proportional truncation
+            selected: list[str] = []
+            budget = self._token_budget
+            total_score = sum(s for s, _, _ in scored_memories)
+
+            for score, content, uri in scored_memories:
+                if budget <= 0:
+                    break
+
+                # Calculate proportional budget allocation based on relevance
+                proportion = score / total_score if total_score > 0 else 0.2
+                allocated_budget = max(50, int(budget * proportion * 2))  # Allow some overshoot
+
+                est_tokens = len(content) // 2
+                if est_tokens > allocated_budget:
+                    # Truncate proportionally to allocated budget
+                    max_chars = allocated_budget * 2
+                    content = content[:max_chars] + "..."
+
+                selected.append(f"[记忆:{uri}] (相关度:{score:.2f})\n{content}")
+                budget -= min(est_tokens, allocated_budget)
+
+            return "\n---\n".join(selected) if selected else ""
 
         except Exception as exc:
             logger.debug("recall failed (degrading gracefully): %s", exc)

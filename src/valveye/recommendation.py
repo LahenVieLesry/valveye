@@ -118,10 +118,11 @@ class _Candidate:
 
 
 class Recommender:
-    def __init__(self, data_service: GameDataService | None = None):
+    def __init__(self, data_service: GameDataService | None = None, embedding_service=None):
         self._data = data_service or GameDataService()
         self._candidate_pool = max(20, settings.steam_recommend_candidate_pool)
         self._negative_review_count = max(1, settings.steam_recommend_negative_review_count)
+        self._embedding_service = embedding_service
 
     async def recommend(self, game_query: str, top_n: int = 10) -> list[dict]:
         if not (game_query or "").strip():
@@ -372,6 +373,15 @@ class Recommender:
         avg_dl = (sum(tag_counts) / len(tag_counts)) if tag_counts else 1.0
 
         target_tags_lower = {t.lower() for t in target.tags_weighted}
+
+        # Pre-compute target embedding if embedding service available
+        target_emb = None
+        if self._embedding_service:
+            try:
+                target_emb = self._embedding_service.get_or_compute(target)
+            except Exception:
+                pass
+
         rows: list[RecommendationItem] = []
         for cand in candidates.values():
             cand_tags_lower = {t.lower() for t in cand.profile.tags_weighted}
@@ -391,13 +401,33 @@ class Recommender:
             # 5. Tag overlap count (absolute, not Jaccard)
             tag_overlap = self._tag_overlap_count(target_tags_lower, cand_tags_lower)
 
-            final_score = (
-                0.50 * bm25
-                + 0.20 * mlk_score
-                + 0.10 * studio
-                + 0.10 * quality
-                + 0.10 * tag_overlap
-            )
+            # 6. Embedding similarity (optional)
+            embed_score = 0.0
+            if target_emb is not None and self._embedding_service:
+                try:
+                    cand_emb = self._embedding_service.get_or_compute(cand.profile)
+                    embed_score = self._embedding_service.similarity(target_emb, cand_emb)
+                except Exception:
+                    pass
+
+            # Adjust weights based on whether embeddings are available
+            if self._embedding_service and target_emb is not None:
+                final_score = (
+                    0.35 * bm25
+                    + 0.20 * embed_score
+                    + 0.15 * mlk_score
+                    + 0.10 * studio
+                    + 0.10 * quality
+                    + 0.10 * tag_overlap
+                )
+            else:
+                final_score = (
+                    0.50 * bm25
+                    + 0.20 * mlk_score
+                    + 0.10 * studio
+                    + 0.10 * quality
+                    + 0.10 * tag_overlap
+                )
 
             inter = sorted(target_tags_lower & cand_tags_lower)
             downside = await self._build_downside(profile=cand.profile)
@@ -406,19 +436,24 @@ class Recommender:
                 matched_signals=sorted(cand.signals),
                 downside=downside,
             )
+
+            similarity_breakdown = {
+                "bm25": bm25,
+                "more_like_this": mlk_score,
+                "studio_affinity": studio,
+                "quality_proximity": quality,
+                "tag_overlap": tag_overlap,
+            }
+            if self._embedding_service and target_emb is not None:
+                similarity_breakdown["embedding"] = embed_score
+
             rows.append(
                 RecommendationItem(
                     title=cand.profile.title,
                     app_id=cand.profile.app_id,
                     score=final_score,
                     tags=cand.profile.tags[:8],
-                    similarity_breakdown={
-                        "bm25": bm25,
-                        "more_like_this": mlk_score,
-                        "studio_affinity": studio,
-                        "quality_proximity": quality,
-                        "tag_overlap": tag_overlap,
-                    },
+                    similarity_breakdown=similarity_breakdown,
                     reason=reason,
                     source_signals=sorted(cand.signals),
                     thumb=cand.profile.thumb,

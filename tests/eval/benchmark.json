@@ -1,0 +1,242 @@
+[
+  {
+    "id": "price_001",
+    "query": "艾尔登法环多少钱",
+    "expected_agent": "price",
+    "expected_tools": ["query_low_price"],
+    "category": "price_query",
+    "difficulty": "easy"
+  },
+  {
+    "id": "price_002",
+    "query": "What's the current price of Baldur's Gate 3?",
+    "expected_agent": "price",
+    "expected_tools": ["query_low_price"],
+    "category": "price_query",
+    "difficulty": "easy"
+  },
+  {
+    "id": "price_003",
+    "query": "黑神话悟空的历史最低价是多少",
+    "expected_agent": "price",
+    "expected_tools": ["query_low_price"],
+    "category": "price_query",
+    "difficulty": "easy"
+  },
+  {
+    "id": "price_004",
+    "query": "Cyberpunk 2077 最近3个月有没有打折",
+    "expected_agent": "price",
+    "expected_tools": ["query_low_price"],
+    "category": "price_query",
+    "difficulty": "medium"
+  },
+  {
+    "id": "price_005",
+    "query": "哪个区买 Elden Ring 最便宜",
+    "expected_agent": "price",
+    "expected_tools": ["compare_prices"],
+    "category": "price_comparison",
+    "difficulty": "easy"
+  },
+  {
+    "id": "price_006",
+    "query": "Compare regional prices for Hogwarts Legacy",
+    "expected_agent": "price",
+    "expected_tools": ["compare_prices"],
+    "category": "price_comparison",
+    "difficulty": "easy"
+  },
+  {
+    "id": "price_007",
+    "query": "星空在各区域的价格分别是多少",
+    "expected_agent": "price",
+    "expected_tools": ["compare_prices"],
+    "category": "price_comparison",
+    "difficulty": "easy"
+  },
+  {
+    "id": "info_001",
+    "query": "介绍一下艾尔登法环",
+    "expected_agent": "info",
+    "expected_tools": ["get_game_details"],
+    "category": "info_query",
+    "difficulty": "easy"
+  },
+  {
+    "id": "info_002",
+    "query": "What kind of game is Hades?",
+    "expected_agent": "info",
+    "expected_tools": ["get_game_details"],
+    "category": "info_query",
+    "difficulty": "easy"
+  },
+  {
+    "id": "info_003",
+    "query": "博德之门3的玩家评价怎么样",
+    "expected_agent": "info",
+    "expected_tools": ["get_game_details", "get_game_reviews"],
+    "category": "info_query",
+    "difficulty": "medium"
+  },
+  {
+    "id": "info_004",
+    "query": "Stellar Blade 好玩吗，差评主要说什么",
+    "expected_agent": "info",
+    "expected_tools": ["get_game_reviews"],
+    "category": "info_query",
+    "difficulty": "medium"
+  },
+  {
+    "id": "info_005",
+    "query": "女神异闻录5是什么类型的游戏",
+    "expected_agent": "info",
+    "expected_tools": ["get_game_details"],
+    "category": "info_query",
+    "difficulty": "easy"
+  },
+  {
+    "id": "info_006",
+    "query": "Tell me about the game mechanics of Factorio",
+    "expected_agent": "info",
+    "expected_tools": ["get_game_details"],
+    "category": "info_query",
+    "difficulty": "easy"
+  },
+  {
+    "id": "recommend_001",
+    "query": "有没有类似空洞骑士的游戏",
+    "expected_agent": "recommend",
+    "expected_tools": ["search_similar_candidates"],
+    "category": "recommendation",
+    "difficulty": "easy"
+  },
+  {
+    "id": "recommend_002",
+    "query": "Recommend games similar to Celeste",
+    "expected_agent": "recommend",
+    "expected_tools": ["search_similar_candidates"],
+    "category": "recommendation",
+    "difficulty": "easy"
+  },
+  {
+    "id": "recommend_003",
+    "query": "我想找一个像只狼但没那么难的动作游戏",
+    "expected_agent": "recommend",
+    "expected_tools": ["search_similar_candidates"],
+    "category": "recommendation",
+    "difficulty": "hard"
+  },
+  {
+    "id": "recommend_004",
+    "query": "有什么好玩的肉鸽卡牌游戏推荐",
+    "expected_agent": "recommend",
+    "expected_tools": ["search_similar_candidates"],
+    "category": "recommendation",
+    "difficulty": "medium"
+  },
+  {
+    "id": "recommend_005",
+    "query": "Games like Stardew Valley but with more combat",
+    "expected_agent": "recommend",
+    "expected_tools": ["search_similar_candidates"],
+    "category": "recommendation",
+    "difficulty": "hard"
+  },
+  {
+    "id": "recommend_006",
+    "query": "帮我推荐几个和塞尔达传说旷野之息类似的游戏",
+    "expected_agent": "recommend",
+    "expected_tools": ["search_similar_candidates"],
+    "category": "recommendation",
+    "difficulty": "easy"
+  },
+  {
+    "id": "subs_001",
+    "query": "帮我订阅艾尔登法环的价格提醒",
+    "expected_agent": "subs",
+    "expected_tools": ["subscribe_game"],
+    "category": "subscription",
+    "difficulty": "easy"
+  },
+  {
+    "id": "subs_002",
+    "query": "Subscribe to price alerts for GTA 6, email: test@example.com",
+    "expected_agent": "subs",
+    "expected_tools": ["subscribe_game"],
+    "category": "subscription",
+    "difficulty": "easy"
+  },
+  {
+    "id": "subs_003",
+    "query": "查看我现有的订阅",
+    "expected_agent": "subs",
+    "expected_tools": ["list_subscriptions"],
+    "category": "subscription",
+    "difficulty": "easy"
+  },
+  {
+    "id": "subs_004",
+    "query": "订阅星空的降价通知，通过 telegram 通知我",
+    "expected_agent": "subs",
+    "expected_tools": ["subscribe_game"],
+    "category": "subscription",
+    "difficulty": "medium"
+  },
+  {
+    "id": "multi_001",
+    "query": "艾尔登法环多少钱，顺便帮我介绍一下这个游戏",
+    "expected_agent": "price",
+    "expected_tools": ["query_low_price", "get_game_details"],
+    "category": "multi_intent",
+    "difficulty": "medium"
+  },
+  {
+    "id": "multi_002",
+    "query": "告诉我博德之门3的价格，然后帮我订阅降价提醒",
+    "expected_agent": "price",
+    "expected_tools": ["query_low_price", "subscribe_game"],
+    "category": "multi_intent",
+    "difficulty": "medium"
+  },
+  {
+    "id": "multi_003",
+    "query": "推荐几个和哈迪斯类似的游戏，然后告诉我它们的价格",
+    "expected_agent": "recommend",
+    "expected_tools": ["search_similar_candidates", "query_low_price"],
+    "category": "multi_intent",
+    "difficulty": "hard"
+  },
+  {
+    "id": "edge_001",
+    "query": "qwertyuiop不存在的游戏12345",
+    "expected_agent": "info",
+    "expected_tools": [],
+    "category": "edge_case",
+    "difficulty": "hard"
+  },
+  {
+    "id": "edge_002",
+    "query": "这个游戏叫什么来着，就是那个打僵尸的",
+    "expected_agent": "info",
+    "expected_tools": [],
+    "category": "edge_case",
+    "difficulty": "hard"
+  },
+  {
+    "id": "edge_003",
+    "query": "GTA6什么时候出",
+    "expected_agent": "info",
+    "expected_tools": ["get_game_details"],
+    "category": "edge_case",
+    "difficulty": "medium"
+  },
+  {
+    "id": "edge_004",
+    "query": "便宜好玩的游戏",
+    "expected_agent": "recommend",
+    "expected_tools": [],
+    "category": "edge_case",
+    "difficulty": "hard"
+  }
+]
