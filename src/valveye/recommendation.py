@@ -22,6 +22,7 @@ from valveye.game_data import (
     _extract_relevance_tags,
     _extract_tags_from_steamspy,
     _merge_tags,
+    is_feature_tag as _is_feature_tag,
 )
 
 _YEAR_RE = re.compile(r"\b(19|20)\d{2}\b")
