@@ -38,7 +38,7 @@ class GameDataService:
             timeout = aiohttp.ClientTimeout(total=self._timeout_sec)
             ssl_ctx = ssl.create_default_context(cafile=certifi.where())
             connector = aiohttp.TCPConnector(ssl=ssl_ctx)
-            self._session = aiohttp.ClientSession(timeout=timeout, connector=connector)
+            self._session = aiohttp.ClientSession(timeout=timeout, connector=connector, trust_env=True)
         return self._session
 
     async def close(self) -> None:

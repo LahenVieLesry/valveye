@@ -26,7 +26,7 @@ _services: dict[str, Any] = {}
 
 def _get_services() -> dict[str, Any]:
     if not _services:
-        repo, price_service, recommender, _scheduler, tools, game_data, _notifier = build_services()
+        repo, price_service, recommender, _scheduler, tools, game_data, _notifier, _steam_library = build_services()
         all_tools, tool_groups = tools
         _services["repo"] = repo
         _services["price_service"] = price_service
@@ -115,6 +115,30 @@ async def list_tools() -> list[Tool]:
                 "required": ["game"],
             },
         ),
+        Tool(
+            name="get_player_library",
+            description=(
+                "Get a player's Steam game library (owned games)."
+                " Returns game count, names, app IDs, and playtime."
+                " Requires STEAM_API_KEY and STEAM_ID to be configured."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "steam_id": {
+                        "type": "string",
+                        "default": "",
+                        "description": "Steam ID (uses configured default if empty)",
+                    },
+                    "include_playtime": {
+                        "type": "boolean",
+                        "default": True,
+                        "description": "Include playtime data",
+                    },
+                },
+                "required": [],
+            },
+        ),
     ]
 
 
@@ -130,6 +154,7 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         "recommend_similar_games": "recommend_similar_games",
         "get_game_info": "get_game_details",
         "get_game_reviews": "get_game_reviews",
+        "get_player_library": "get_player_library",
     }
 
     lc_name = mcp_to_langchain.get(name)

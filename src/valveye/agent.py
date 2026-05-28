@@ -3,6 +3,7 @@ from __future__ import annotations
 import json as _json
 import operator
 import re
+import warnings
 from collections.abc import AsyncIterator
 from typing import Annotated, Any, TypedDict
 
@@ -42,6 +43,7 @@ class SupervisorState(TypedDict):
     original_query: str
     handoff_pending: bool
     trace_id: str
+    supervisor_response: str
 
 
 # ── LLM builder ───────────────────────────────────────────────────────────
@@ -62,6 +64,7 @@ def build_llm() -> ChatOpenAI:
 async def build_multi_agent(
     tool_groups: dict[str, list],
     get_game_details_fn,
+    memory: VikingMemory | None = None,
 ) -> Any:
     """Build the Supervisor + Specialist multi-agent graph."""
     llm = build_llm()
@@ -129,13 +132,19 @@ async def build_multi_agent(
 
         # Try structured output first (Pydantic schema validation)
         task_queue: list[dict] = []
+        direct_response: str | None = None
         if settings.use_structured_routing:
             try:
-                structured_router = router_llm.with_structured_output(SupervisorRouting)
-                routing: SupervisorRouting = await structured_router.ainvoke([
-                    SystemMessage(content=SUPERVISOR_PROMPT),
-                    HumanMessage(content=content),
-                ])
+                with warnings.catch_warnings():
+                    warnings.filterwarnings("ignore", message=".*Pydantic.*", category=UserWarning)
+                    structured_router = router_llm.with_structured_output(SupervisorRouting)
+                    routing: SupervisorRouting = await structured_router.ainvoke([
+                        SystemMessage(content=SUPERVISOR_PROMPT),
+                        HumanMessage(content=content),
+                    ])
+                # Check for direct response
+                if routing.direct_response:
+                    direct_response = routing.direct_response
                 for t in routing.tasks:
                     if t.agent in ("price", "info", "recommend", "subs"):
                         task_queue.append({"agent": t.agent, "query": t.query or content})
@@ -144,7 +153,7 @@ async def build_multi_agent(
                 pass
 
         # Fallback: regex-based JSON parsing
-        if not task_queue:
+        if not task_queue and not direct_response:
             result = await router_llm.ainvoke([
                 SystemMessage(content=SUPERVISOR_PROMPT),
                 HumanMessage(content=content),
@@ -165,7 +174,7 @@ async def build_multi_agent(
                 pass
 
         # Fallback: keyword-based routing
-        if not task_queue:
+        if not task_queue and not direct_response:
             fallback_agent = _keyword_fallback(content)
             task_queue = [{"agent": fallback_agent, "query": content}]
 
@@ -177,8 +186,20 @@ async def build_multi_agent(
             data={
                 "query": content[:100],
                 "tasks": [(t["agent"], t["query"][:50]) for t in task_queue],
+                "direct": bool(direct_response),
             },
         ))
+
+        # Direct response — no specialist agent needed
+        if direct_response:
+            return {
+                "active_agent": "direct",
+                "task_queue": [],
+                "current_task_index": 0,
+                "original_query": content,
+                "trace_id": trace_id,
+                "supervisor_response": direct_response,
+            }
 
         return {
             "active_agent": task_queue[0]["agent"],
@@ -190,28 +211,49 @@ async def build_multi_agent(
 
     def route_to_agent(state: SupervisorState) -> str:
         """Read current task from queue, return agent node name."""
+        active = state.get("active_agent", "info")
+        if active == "direct":
+            return "direct"
         queue = state.get("task_queue", [])
         idx = state.get("current_task_index", 0)
         if queue and idx < len(queue):
             agent = queue[idx]["agent"]
         else:
-            agent = state.get("active_agent", "info")
+            agent = active
         return f"{agent}_agent"
 
-    def pre_process_node(state: SupervisorState) -> dict:
-        """Inject current task query as a HumanMessage for the agent."""
+    async def pre_process_node(state: SupervisorState) -> dict:
+        """Inject current task query as a HumanMessage for the agent, with optional memory recall."""
         queue = state.get("task_queue", [])
         idx = state.get("current_task_index", 0)
-        if queue and idx < len(queue):
-            task = queue[idx]
-            # After handoff, game details are already in messages — skip re-injection
-            if state.get("handoff_pending"):
-                return {"active_agent": task["agent"], "handoff_pending": False}
-            return {
-                "messages": [HumanMessage(content=task["query"])],
-                "active_agent": task["agent"],
-            }
-        return {}
+        if not queue or idx >= len(queue):
+            return {}
+
+        task = queue[idx]
+
+        # After handoff, game details are already in messages — skip re-injection
+        if state.get("handoff_pending"):
+            return {"active_agent": task["agent"], "handoff_pending": False}
+
+        # Memory recall — only for specialist agent paths
+        query = task["query"]
+        if memory:
+            try:
+                ctx = await memory.recall(query=query, session_id=state.get("trace_id", ""))
+                if ctx:
+                    query = f"[相关记忆]\n{ctx}\n\n[用户消息]\n{query}"
+            except Exception:
+                pass  # memory recall failure is non-fatal
+
+        return {
+            "messages": [HumanMessage(content=query)],
+            "active_agent": task["agent"],
+        }
+
+    def direct_respond_node(state: SupervisorState) -> dict:
+        """Emit supervisor's direct response as an AIMessage."""
+        response = state.get("supervisor_response", "你好！有什么可以帮你的吗？")
+        return {"messages": [AIMessage(content=response)]}
 
     async def post_process_node(state: SupervisorState) -> dict:
         """Detect handoff requests, advance task queue, or finish."""
@@ -327,6 +369,9 @@ async def build_multi_agent(
     # Post-processing
     builder.add_node("post_process", post_process_node)
 
+    # Direct response (supervisor handles simple messages)
+    builder.add_node("direct_respond", direct_respond_node)
+
     # --- Edges ---
     builder.add_edge(START, "route_supervisor")
     builder.add_conditional_edges("route_supervisor", route_to_agent, {
@@ -334,7 +379,9 @@ async def build_multi_agent(
         "info_agent": "pre_process",
         "recommend_agent": "pre_process",
         "subs_agent": "pre_process",
+        "direct": "direct_respond",
     })
+    builder.add_edge("direct_respond", END)
 
     # After pre_process, route to the correct agent
     builder.add_conditional_edges("pre_process", route_to_agent, {
@@ -370,16 +417,6 @@ async def build_multi_agent(
 _AGENT_NAMES = {"price_agent", "info_agent", "recommend_agent", "subs_agent"}
 
 
-async def _enhance_with_memory(message: str, thread_id: str, memory: VikingMemory | None) -> str:
-    """Enhance message with memory recall context."""
-    if not memory:
-        return message
-    ctx = await memory.recall(query=message, session_id=thread_id)
-    if ctx:
-        return f"[相关记忆]\n{ctx}\n\n[用户消息]\n{message}"
-    return message
-
-
 async def stream_turn(
     agent,
     message: str,
@@ -401,12 +438,14 @@ async def stream_turn(
     trace_id = new_trace_id()
     config = {"configurable": {"thread_id": thread_id, "trace_id": trace_id}, "recursion_limit": 20}
 
-    enhanced = await _enhance_with_memory(message, thread_id, memory)
-
+    # Memory recall is now handled inside the graph's pre_process_node,
+    # so we pass the raw message here.
     current_agent = ""
     collected: list[str] = []
     turn_metrics: TurnMetrics | None = None
     tool_outputs: list[str] = []
+    in_supervisor = False
+    supervisor_tokens: list[str] = []
 
     if metrics_collector:
         turn_metrics = metrics_collector.start_turn(trace_id, message)
@@ -415,14 +454,26 @@ async def stream_turn(
     yield {"type": "trace_id", "trace_id": trace_id}
 
     async for event in agent.astream_events(
-        {"messages": [HumanMessage(content=enhanced)]},
+        {"messages": [HumanMessage(content=message)]},
         config=config,
         version="v2",
     ):
         kind = event.get("event")
         name = event.get("name", "")
 
-        # Detect agent transitions
+        # Track supervisor phase
+        if kind == "on_chain_start" and name == "route_supervisor":
+            in_supervisor = True
+            continue
+
+        # Direct response node — emit buffered supervisor tokens
+        if kind == "on_chain_start" and name == "direct_respond":
+            for t in supervisor_tokens:
+                collected.append(t)
+                yield {"type": "token", "content": t}
+            continue
+
+        # Detect specialist agent transitions
         if kind == "on_chain_start" and name in _AGENT_NAMES:
             if current_agent and current_agent != name:
                 yield {"type": "handoff", "from": current_agent, "to": name}
@@ -431,14 +482,17 @@ async def stream_turn(
                 metrics_collector.record_routing(turn_metrics, name)
             yield {"type": "agent_start", "agent": name}
 
-        elif kind == "on_chat_model_stream" and current_agent:
-            # Only capture tokens from specialist agent subgraphs,
-            # not from the supervisor's internal routing LLM call
+        elif kind == "on_chat_model_stream":
             chunk = event["data"]["chunk"]
             if chunk.content:
                 text = chunk.content if isinstance(chunk.content, str) else str(chunk.content)
-                collected.append(text)
-                yield {"type": "token", "content": text}
+                if in_supervisor:
+                    # Buffer supervisor tokens — only emit if direct response
+                    supervisor_tokens.append(text)
+                elif current_agent:
+                    # Specialist agent tokens
+                    collected.append(text)
+                    yield {"type": "token", "content": text}
 
         elif kind == "on_tool_start" and current_agent:
             tool_name = event.get("name", "unknown")
@@ -462,9 +516,12 @@ async def stream_turn(
             error = str(event.get("data", {}).get("error", "unknown error"))
             yield {"type": "tool_end", "name": event.get("name", ""), "output": f"错误: {error}"}
 
-        elif kind == "on_chain_end" and name in _AGENT_NAMES:
-            yield {"type": "agent_end", "agent": name}
-            current_agent = ""
+        elif kind == "on_chain_end":
+            if name == "route_supervisor":
+                in_supervisor = False
+            elif name in _AGENT_NAMES:
+                yield {"type": "agent_end", "agent": name}
+                current_agent = ""
 
     # Auto-Capture and validation
     if memory and collected:
@@ -490,10 +547,9 @@ async def run_single_turn(
 ) -> str:
     config = {"configurable": {"thread_id": thread_id}, "recursion_limit": 20}
 
-    enhanced = await _enhance_with_memory(message, thread_id, memory)
-
+    # Memory recall is now handled inside the graph's pre_process_node
     result = await agent.ainvoke(
-        {"messages": [HumanMessage(content=enhanced)]},
+        {"messages": [HumanMessage(content=message)]},
         config=config,
     )
     ai_messages = [m for m in result["messages"] if isinstance(m, AIMessage)]

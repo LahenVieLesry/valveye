@@ -95,3 +95,28 @@ class RecommendationItem:
             "source_signals": self.source_signals,
             "thumb": self.thumb,
         }
+
+
+@dataclass(slots=True)
+class OwnedGame:
+    app_id: int
+    name: str
+    playtime_forever: int  # minutes
+    playtime_2weeks: int | None = None
+    img_icon_url: str | None = None
+
+
+@dataclass(slots=True)
+class OwnedGamesResult:
+    steam_id: str
+    game_count: int
+    games: list[OwnedGame]
+    error: str | None = None
+
+    @classmethod
+    def empty(cls, steam_id: str = "", error: str = "") -> OwnedGamesResult:
+        return cls(steam_id=steam_id, game_count=0, games=[], error=error or None)
+
+    @property
+    def app_ids(self) -> set[int]:
+        return {g.app_id for g in self.games}

@@ -7,10 +7,11 @@ from langchain_core.tools import tool
 from valveye.game_data import GameDataService
 from valveye.pricing import PriceService, _detect_region, fetch_all_regions
 from valveye.recommendation import Recommender
+from valveye.steam_library import SteamLibraryService
 from valveye.subscriptions import SubscriptionRepository
 
 
-def build_tools(price_service: PriceService, recommender: Recommender, game_data: GameDataService, repo: SubscriptionRepository):
+def build_tools(price_service: PriceService, recommender: Recommender, game_data: GameDataService, repo: SubscriptionRepository, steam_library: SteamLibraryService | None = None):
     @tool
     async def query_low_price(game: str, user_query: str = "", region: str = "", currency: str = "", window: str = "all") -> str:
         """查询某游戏当前价与史低信息，window 支持 all/12m/3m。game 参数必须为 Steam 官方英文名。
@@ -59,16 +60,30 @@ def build_tools(price_service: PriceService, recommender: Recommender, game_data
 
     @tool
     async def recommend_similar_games(game: str, top_n: int = 5) -> str:
-        """推荐同类游戏（标签+相似产品+差评摘要），返回结构化 JSON。game 参数必须为 Steam 官方英文名。"""
-        result = await recommender.recommend(game_query=game, top_n=top_n)
+        """推荐同类游戏（标签+相似产品+差评摘要），返回结构化 JSON。
+        自动排除玩家已拥有的游戏。game 参数必须为 Steam 官方英文名。"""
+        owned_ids: set[int] = set()
+        if steam_library is not None:
+            try:
+                owned_ids = await steam_library.get_owned_app_ids()
+            except Exception:
+                pass
+        result = await recommender.recommend(game_query=game, top_n=top_n, owned_app_ids=owned_ids)
         return json.dumps(result, ensure_ascii=False)
 
     @tool
     async def search_similar_candidates(game: str, top_n: int = 15) -> str:
         """搜索与指定游戏相似的候选游戏列表（轻量级，不含详细描述）。
-        返回标题、标签、差评率和来源信号。用于先发现候选，再用 get_game_details 深入调查。
+        返回标题、标签、差评率和来源信号。自动排除玩家已拥有的游戏。
+        用于先发现候选，再用 get_game_details 深入调查。
         game 参数必须为 Steam 官方英文名。"""
-        result = await recommender.search_candidates(game_query=game, top_n=top_n)
+        owned_ids: set[int] = set()
+        if steam_library is not None:
+            try:
+                owned_ids = await steam_library.get_owned_app_ids()
+            except Exception:
+                pass
+        result = await recommender.search_candidates(game_query=game, top_n=top_n, owned_app_ids=owned_ids)
         if not result:
             return "未找到相似候选，请检查游戏名称。"
         return json.dumps(result, ensure_ascii=False)
@@ -197,23 +212,55 @@ def build_tools(price_service: PriceService, recommender: Recommender, game_data
         return f"正在为您获取以下游戏的详细信息: {games}，请稍候…"
 
     @tool
+    async def get_player_library(steam_id: str = "", include_playtime: bool = True) -> str:
+        """查询玩家的 Steam 游戏库。返回已拥有游戏列表、游戏数量和游戏时长。
+        steam_id 留空时使用默认配置的 Steam ID。
+        当玩家询问「我有哪些游戏」「我的游戏库」「我有没有 XX 游戏」时使用。"""
+        if steam_library is None:
+            return "游戏库查询功能未启用（STEAM_API_KEY 未配置）"
+        result = await steam_library.get_owned_games(steam_id=steam_id or None)
+        if result.error:
+            return f"查询失败：{result.error}"
+        if not result.games:
+            return "未找到已拥有游戏，可能 Steam 档案为私密状态。"
+        games_out = []
+        for g in result.games[:50]:  # cap at 50 for token budget
+            entry: dict = {"app_id": g.app_id, "name": g.name}
+            if include_playtime:
+                entry["playtime_hours"] = round(g.playtime_forever / 60, 1)
+            games_out.append(entry)
+        return json.dumps({
+            "steam_id": result.steam_id,
+            "game_count": result.game_count,
+            "showing": len(games_out),
+            "games": games_out,
+        }, ensure_ascii=False)
+
+    @tool
     async def search_by_description(description: str, top_n: int = 10) -> str:
         """根据自然语言描述搜索游戏。当用户描述想要的游戏类型但没有指定具体游戏时使用。
+        自动排除玩家已拥有的游戏。
         例如："类似黑魂但不那么难的游戏"、"像素风种田游戏"、"有合作模式的肉鸽卡牌"。"""
-        result = await recommender.recommend(game_query=description, top_n=top_n)
+        owned_ids: set[int] = set()
+        if steam_library is not None:
+            try:
+                owned_ids = await steam_library.get_owned_app_ids()
+            except Exception:
+                pass
+        result = await recommender.recommend(game_query=description, top_n=top_n, owned_app_ids=owned_ids)
         if not result:
             return "未找到匹配的游戏，请尝试更具体的描述。"
         return json.dumps(result, ensure_ascii=False)
 
-    all_tools = [query_low_price, compare_prices, search_similar_candidates, get_game_details, get_game_reviews, recommend_similar_games, subscribe_game, list_subscriptions, request_game_details, search_by_description]
+    all_tools = [query_low_price, compare_prices, search_similar_candidates, get_game_details, get_game_reviews, recommend_similar_games, subscribe_game, list_subscriptions, request_game_details, search_by_description, get_player_library]
 
     # 按 Agent 分组的工具列表
     tool_map = {t.name: t for t in all_tools}
     tool_groups = {
         "price": [tool_map["query_low_price"], tool_map["compare_prices"]],
-        "info": [tool_map["get_game_details"], tool_map["get_game_reviews"]],
+        "info": [tool_map["get_game_details"], tool_map["get_game_reviews"], tool_map["get_player_library"]],
         "recommend": [tool_map["search_similar_candidates"], tool_map["recommend_similar_games"], tool_map["request_game_details"], tool_map["search_by_description"]],
-        "subs": [tool_map["subscribe_game"], tool_map["list_subscriptions"]],
+        "subs": [tool_map["subscribe_game"], tool_map["list_subscriptions"], tool_map["get_player_library"]],
     }
 
     return all_tools, tool_groups

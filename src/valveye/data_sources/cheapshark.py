@@ -18,7 +18,7 @@ class CheapSharkSource(PriceSource):
         timeout = aiohttp.ClientTimeout(total=15)
         ssl_ctx = ssl.create_default_context(cafile=certifi.where())
         connector = aiohttp.TCPConnector(ssl=ssl_ctx)
-        async with aiohttp.ClientSession(timeout=timeout, connector=connector) as session:
+        async with aiohttp.ClientSession(timeout=timeout, connector=connector, trust_env=True) as session:
             async with session.get(
                 f"{settings.cheapshark_base_url}/games",
                 params={"title": game_query, "limit": 1, "exact": 0},

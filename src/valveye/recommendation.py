@@ -124,7 +124,7 @@ class Recommender:
         self._negative_review_count = max(1, settings.steam_recommend_negative_review_count)
         self._embedding_service = embedding_service
 
-    async def recommend(self, game_query: str, top_n: int = 10) -> list[dict]:
+    async def recommend(self, game_query: str, top_n: int = 10, owned_app_ids: set[int] | None = None) -> list[dict]:
         if not (game_query or "").strip():
             return []
 
@@ -134,9 +134,9 @@ class Recommender:
             game_query=en_name, resolved_app_id=resolved_app_id,
         )
         if target is None:
-            return await self._fallback_name_similarity(game_query=en_name, top_n=top_n)
+            return await self._fallback_name_similarity(game_query=en_name, top_n=top_n, owned_app_ids=owned_app_ids)
 
-        candidates = await self._collect_candidates(target=target, game_query=en_name)
+        candidates = await self._collect_candidates(target=target, game_query=en_name, owned_app_ids=owned_app_ids)
         if not candidates:
             return []
 
@@ -148,7 +148,7 @@ class Recommender:
         )
         return [row.to_dict() for row in ranked]
 
-    async def search_candidates(self, game_query: str, top_n: int = 15) -> list[dict]:
+    async def search_candidates(self, game_query: str, top_n: int = 15, owned_app_ids: set[int] | None = None) -> list[dict]:
         """Public method for LLM tools: returns lightweight candidate list without full ranking."""
         if not (game_query or "").strip():
             return []
@@ -160,7 +160,7 @@ class Recommender:
         if target is None:
             return []
 
-        candidates = await self._collect_candidates(target=target, game_query=en_name)
+        candidates = await self._collect_candidates(target=target, game_query=en_name, owned_app_ids=owned_app_ids)
         if not candidates:
             return []
 
@@ -228,6 +228,7 @@ class Recommender:
         self,
         target: GameProfile,
         game_query: str,
+        owned_app_ids: set[int] | None = None,
     ) -> dict[int, _Candidate]:
         candidates: dict[int, _Candidate] = {}
         target_tags = target.relevance_tags[:5]
@@ -291,6 +292,10 @@ class Recommender:
                 continue
             c.profile = profile
             enriched[app_id] = c
+
+        # Filter out owned games
+        if owned_app_ids:
+            enriched = {k: v for k, v in enriched.items() if k not in owned_app_ids}
 
         return enriched
 
@@ -479,7 +484,7 @@ class Recommender:
 
         return "暂无足够差评样本"
 
-    async def _fallback_name_similarity(self, game_query: str, top_n: int) -> list[dict]:
+    async def _fallback_name_similarity(self, game_query: str, top_n: int, owned_app_ids: set[int] | None = None) -> list[dict]:
         session = await self._data._get_session()
         try:
             async with session.get(
@@ -529,6 +534,11 @@ class Recommender:
             )
 
         scored.sort(key=lambda x: x.score, reverse=True)
+
+        # Filter out owned games
+        if owned_app_ids:
+            scored = [s for s in scored if s.app_id not in owned_app_ids]
+
         selected = scored[:top_n]
         backfill_cache: dict[str, GameProfile | None] = {}
 

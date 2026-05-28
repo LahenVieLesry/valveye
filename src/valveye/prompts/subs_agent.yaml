@@ -21,3 +21,8 @@ versions:
 
       玩家说："订阅 XX 游戏，邮箱 test@example.com"
       → 调用 `subscribe_game(user_id="cli_user", game="XX", channels_json='[{{"type":"email","to":"test@example.com"}}]')`
+
+      ## 拥有检查
+
+      - 订阅前建议先调用 get_player_library 检查是否已拥有。
+      - 如已拥有，提醒玩家并确认是否继续订阅。

@@ -257,7 +257,7 @@ def _search_locales(query: str) -> list[tuple[str, str]]:
 def _make_session(timeout_sec: float = 12) -> aiohttp.ClientSession:
     ssl_ctx = ssl.create_default_context(cafile=certifi.where())
     connector = aiohttp.TCPConnector(ssl=ssl_ctx)
-    return aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=timeout_sec), connector=connector)
+    return aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=timeout_sec), connector=connector, trust_env=True)
 
 
 async def resolve_game(

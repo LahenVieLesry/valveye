@@ -26,6 +26,8 @@ class Settings:
     cheapshark_base_url: str = os.getenv("CHEAPSHARK_BASE_URL", "https://www.cheapshark.com/api/1.0")
     steam_store_base_url: str = os.getenv("STEAM_STORE_BASE_URL", "https://store.steampowered.com")
     steam_web_api_base_url: str = os.getenv("STEAM_WEB_API_BASE_URL", "https://api.steampowered.com")
+    steam_api_key: str = os.getenv("STEAM_API_KEY", "")
+    steam_id: str = os.getenv("STEAM_ID", "")
     steamspy_api_base_url: str = os.getenv("STEAMSPY_API_BASE_URL", "https://steamspy.com")
     steam_recommend_timeout_sec: int = int(os.getenv("STEAM_RECOMMEND_TIMEOUT_SEC", "15"))
     steam_recommend_candidate_pool: int = int(os.getenv("STEAM_RECOMMEND_CANDIDATE_POOL", "60"))
@@ -69,6 +71,8 @@ class Settings:
             warnings.append("OPENAI_API_KEY 未设置，AI 对话功能将不可用")
         if not self.itad_api_key:
             warnings.append("ITAD_API_KEY 未设置，价格查询将降级为 CheapShark 单源")
+        if not self.steam_api_key:
+            warnings.append("STEAM_API_KEY 未设置，游戏库查询功能将不可用（推荐仍正常工作）")
         return warnings
 
 

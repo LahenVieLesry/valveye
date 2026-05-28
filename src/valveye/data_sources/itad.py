@@ -31,7 +31,7 @@ class ITADSource(PriceSource):
         common_params = {"key": settings.itad_api_key}
 
         try:
-            async with aiohttp.ClientSession(timeout=timeout, connector=connector) as session:
+            async with aiohttp.ClientSession(timeout=timeout, connector=connector, trust_env=True) as session:
                 async with session.get(
                     f"{base_url}/games/search/v1",
                     params={**common_params, "title": game_query, "results": 1},

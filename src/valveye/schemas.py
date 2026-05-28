@@ -16,8 +16,12 @@ class RoutingTask(BaseModel):
 class SupervisorRouting(BaseModel):
     """Structured output from the supervisor routing LLM."""
 
-    reasoning: str = Field(description="Brief analysis of user intent")
+    reasoning: str = Field(description="简要分析用户意图")
     tasks: list[RoutingTask] = Field(
-        min_length=1,
-        description="Ordered list of tasks to execute",
+        min_length=0,
+        description="任务列表，直接回复时为空数组",
+    )
+    direct_response: str | None = Field(
+        default=None,
+        description="直接回复内容，非空时表示无需转发给任何 agent",
     )

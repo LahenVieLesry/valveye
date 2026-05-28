@@ -25,7 +25,7 @@ class SteamDBSource(PriceSource):
         timeout = aiohttp.ClientTimeout(total=12)
         ssl_ctx = ssl.create_default_context(cafile=certifi.where())
         connector = aiohttp.TCPConnector(ssl=ssl_ctx)
-        async with aiohttp.ClientSession(timeout=timeout, connector=connector) as session, session.get(
+        async with aiohttp.ClientSession(timeout=timeout, connector=connector, trust_env=True) as session, session.get(
             f"{settings.steamdb_api_base.rstrip('/')}/price",
             params={"q": game_query, "cc": region.lower(), "currency": currency.upper()},
         ) as resp:

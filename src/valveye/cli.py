@@ -38,6 +38,7 @@ from valveye.notifications import Notifier
 from valveye.pricing import PriceService
 from valveye.recommendation import Recommender
 from valveye.scheduler import PriceCheckScheduler
+from valveye.steam_library import SteamLibraryService
 from valveye.subscriptions import SubscriptionRepository
 
 # ── Rich console ────────────────────────────────────────────────────────────
@@ -77,6 +78,7 @@ _TOOL_DISPLAY: dict[str, str] = {
     "subscribe_game":         "订阅价格提醒",
     "list_subscriptions":     "查看订阅列表",
     "request_game_details":   "请求游戏详情",
+    "get_player_library":     "查看游戏库",
 }
 
 _AGENT_DISPLAY: dict[str, str] = {
@@ -84,6 +86,7 @@ _AGENT_DISPLAY: dict[str, str] = {
     "info_agent":       "游戏信息",
     "recommend_agent":  "游戏推荐",
     "subs_agent":       "订阅管理",
+    "direct":           "助手",
 }
 
 
@@ -749,8 +752,8 @@ async def _run_agent_turn(
     thinking_text = "".join(thinking_parts).strip()
     response_text = "".join(response_parts).strip()
 
-    # Print agent header if multiple agents were involved
-    if current_agent_label:
+    # Print agent header only when agent did actual work (tools or thinking)
+    if current_agent_label and (tool_calls or thinking_text):
         console.print(f"\n  [bold cyan]▸[/] {current_agent_label}")
 
     _print_thinking_panel(thinking_text, fold_state)
@@ -1034,15 +1037,19 @@ def build_services():
     sources = [ITADSource(), SteamDBSource(), CheapSharkSource()]
     price_service = PriceService(sources=sources)
     game_data = GameDataService()
+    steam_library = SteamLibraryService(
+        steam_api_key=settings.steam_api_key,
+        default_steam_id=settings.steam_id,
+    )
     recommender = Recommender(data_service=game_data)
     notifier = Notifier()
     scheduler = PriceCheckScheduler(repo=repo, price_service=price_service, notifier=notifier, game_data_service=game_data)
-    tools = build_tools(price_service=price_service, recommender=recommender, game_data=game_data, repo=repo)
-    return repo, price_service, recommender, scheduler, tools, game_data, notifier
+    tools = build_tools(price_service=price_service, recommender=recommender, game_data=game_data, repo=repo, steam_library=steam_library)
+    return repo, price_service, recommender, scheduler, tools, game_data, notifier, steam_library
 
 
 async def _run(args: argparse.Namespace) -> int:
-    repo, price_service, recommender, scheduler, tools, game_data, notifier = build_services()
+    repo, price_service, recommender, scheduler, tools, game_data, notifier, steam_library = build_services()
 
     if args.command == "query":
         snapshot = await price_service.fetch_first_available(args.game, args.region, args.currency)
@@ -1125,12 +1132,11 @@ async def _run(args: argparse.Namespace) -> int:
     # ── chat ──────────────────────────────────────────────────────────────
     if args.command == "chat":
         all_tools, tool_groups = tools
-        checkpointer_conn = None
-        agent, checkpointer_conn = await build_multi_agent(tool_groups, get_game_details_fn=tool_groups["info"][0])
         chat_store = ChatStore()
         thread_id = chat_store.create_thread()
 
         # OpenViking 记忆层初始化（自动启动 server）
+        # 必须在 build_multi_agent 之前完成，以便 memory 作为闭包传入图节点
         memory: VikingMemory | None = None
         _ov_started_by_us = False
         if settings.openviking_enabled:
@@ -1163,6 +1169,13 @@ async def _run(args: argparse.Namespace) -> int:
                 if _ov_started_by_us:
                     await _stop_openviking_server()
                     _ov_started_by_us = False
+
+        checkpointer_conn = None
+        agent, checkpointer_conn = await build_multi_agent(
+            tool_groups,
+            get_game_details_fn=tool_groups["info"][0],
+            memory=memory,
+        )
 
         try:
             # single-turn mode
@@ -1299,6 +1312,7 @@ async def _run(args: argparse.Namespace) -> int:
             if checkpointer_conn is not None:
                 await checkpointer_conn.close()
             await game_data.close()
+            await steam_library.close()
             await price_service.close()
             await notifier.close()
             repo.close()
