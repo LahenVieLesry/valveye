@@ -139,6 +139,37 @@ async def list_tools() -> list[Tool]:
                 "required": [],
             },
         ),
+        Tool(
+            name="get_trending_games",
+            description=(
+                "Get trending / featured Steam games."
+                " Categories: top_sellers (bestsellers), new_releases (recently launched),"
+                " specials (current deals), coming_soon (upcoming)."
+                " Primary source: Steam Store API; falls back to SteamSpy if unavailable."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "category": {
+                        "type": "string",
+                        "enum": ["top_sellers", "new_releases", "specials", "coming_soon"],
+                        "default": "top_sellers",
+                        "description": "Category of trending games",
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "default": 10,
+                        "description": "Max number of games to return",
+                    },
+                    "cc": {
+                        "type": "string",
+                        "default": "cn",
+                        "description": "Country code for pricing (e.g. cn, us, jp)",
+                    },
+                },
+                "required": [],
+            },
+        ),
     ]
 
 
@@ -155,6 +186,7 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         "get_game_info": "get_game_details",
         "get_game_reviews": "get_game_reviews",
         "get_player_library": "get_player_library",
+        "get_trending_games": "get_trending_games",
     }
 
     lc_name = mcp_to_langchain.get(name)

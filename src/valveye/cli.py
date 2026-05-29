@@ -695,7 +695,7 @@ async def _run_agent_turn(
     with Live(
         Group(Text("  [magenta]💭[/]  思考中…", style="dim")),
         console=console,
-        refresh_per_second=12,
+        refresh_per_second=3,
         transient=True,
     ) as live:
         async for event in stream_turn(agent, message, thread_id, memory=memory):

@@ -50,3 +50,10 @@ versions:
 
       - 当玩家询问「我有哪些游戏」「我的游戏库」「我有没有 XX 游戏」时，调用 get_player_library。
       - 可以根据游戏库信息分析玩家的游戏偏好和游戏时长分布。
+
+      ## 热门游戏查询
+
+      - 当玩家询问「最近有什么热门游戏」「热销榜」「新品推荐」「有什么打折」「即将推出的游戏」时，调用 get_trending_games。
+      - category 参数：top_sellers（热销）、new_releases（新品）、specials（特惠）、coming_soon（即将推出）。
+      - 默认查询热销商品（top_sellers），如果玩家明确要求新品/特惠/即将推出，切换对应 category。
+      - 返回结果后可简要点评折扣力度或值得关注的作品。

@@ -9,7 +9,7 @@ import aiohttp
 import certifi
 
 from valveye.config import settings
-from valveye.domain import GameProfile
+from valveye.domain import GameProfile, TrendingGame
 from valveye.pricing import resolve_game
 from valveye.retry import async_retry
 
@@ -176,6 +176,160 @@ class GameDataService:
             if len(snippets) >= count:
                 break
         return snippets
+
+    # ── Trending / Featured ──────────────────────────────────────────────
+
+    # Steam Store category keys → human-readable labels
+    _STEAM_CATEGORY_MAP: dict[str, str] = {
+        "top_sellers": "热销商品",
+        "new_releases": "新品推荐",
+        "specials": "特惠精选",
+        "coming_soon": "即将推出",
+    }
+
+    async def fetch_trending(
+        self,
+        category: str = "top_sellers",
+        limit: int = 10,
+        cc: str = "cn",
+        lang: str = "schinese",
+    ) -> list[TrendingGame]:
+        """Fetch trending / featured games.
+
+        Primary: Steam Store ``/api/featuredcategories``.
+        Fallback: SteamSpy ``/api.php?request=top100in2weeks``.
+
+        Parameters
+        ----------
+        category:
+            One of ``top_sellers``, ``new_releases``, ``specials``, ``coming_soon``.
+            Falls back to SteamSpy with ``top100in2weeks`` / ``top100forever`` /
+            ``top100owned``.
+        limit:
+            Max items to return (default 10).
+        cc / lang:
+            Country code and language for Steam Store API.
+        """
+        # --- try Steam Store API first ---
+        games = await self._fetch_steam_featured(category, limit, cc=cc, lang=lang)
+        if games:
+            return games
+
+        # --- fallback to SteamSpy ---
+        spy_category = {
+            "top_sellers": "top100in2weeks",
+            "new_releases": "top100in2weeks",
+            "specials": "top100in2weeks",
+            "coming_soon": "top100forever",
+        }.get(category, "top100in2weeks")
+        return await self._fetch_steamspy_trending(spy_category, limit)
+
+    async def _fetch_steam_featured(
+        self, category: str, limit: int, cc: str = "cn", lang: str = "schinese",
+    ) -> list[TrendingGame]:
+        """Fetch from Steam Store ``/api/featuredcategories``."""
+        session = await self._get_session()
+        url = f"{settings.steam_store_base_url.rstrip('/')}/api/featuredcategories"
+        try:
+            async with session.get(url, params={"l": lang, "cc": cc}) as resp:
+                if resp.status >= 400:
+                    return []
+                payload = await resp.json(content_type=None)
+        except (aiohttp.ClientError, asyncio.TimeoutError, ValueError):
+            return []
+
+        if not isinstance(payload, dict):
+            return []
+
+        # Each category is a top-level key with an "items" array
+        cat_data = payload.get(category)
+        if not isinstance(cat_data, dict):
+            return []
+        items = cat_data.get("items")
+        if not isinstance(items, list):
+            return []
+
+        currency = ""
+        result: list[TrendingGame] = []
+        for it in items[:limit]:
+            if not isinstance(it, dict):
+                continue
+            app_id = it.get("id")
+            name = it.get("name")
+            if not isinstance(app_id, (int, float)) or not isinstance(name, str):
+                continue
+            if not currency:
+                currency = str(it.get("currency") or "")
+
+            # Prices come in hundredths (e.g. 7700 = ¥77.00)
+            raw_orig = it.get("original_price")
+            raw_final = it.get("final_price")
+            original_price: float | None = None
+            final_price: float | None = None
+            try:
+                if isinstance(raw_orig, (int, float)) and raw_orig > 0:
+                    original_price = raw_orig / 100
+            except (TypeError, ValueError):
+                pass
+            try:
+                if isinstance(raw_final, (int, float)):
+                    final_price = raw_final / 100
+            except (TypeError, ValueError):
+                pass
+
+            discount = 0
+            try:
+                discount = int(it.get("discount_percent") or 0)
+            except (TypeError, ValueError):
+                pass
+
+            result.append(TrendingGame(
+                app_id=int(app_id),
+                name=name,
+                discount_percent=discount,
+                original_price=original_price,
+                final_price=final_price,
+                currency=currency,
+                source="steam_featured",
+            ))
+        return result
+
+    async def _fetch_steamspy_trending(
+        self, category: str, limit: int,
+    ) -> list[TrendingGame]:
+        """Fetch from SteamSpy ``/api.php``."""
+        session = await self._get_session()
+        url = f"{settings.steamspy_api_base_url.rstrip('/')}/api.php"
+        try:
+            async with session.get(url, params={"request": category}) as resp:
+                if resp.status >= 400:
+                    return []
+                payload = await resp.json(content_type=None)
+        except (aiohttp.ClientError, asyncio.TimeoutError, ValueError):
+            return []
+
+        if not isinstance(payload, dict):
+            return []
+
+        result: list[TrendingGame] = []
+        for app_id_str, info in payload.items():
+            if len(result) >= limit:
+                break
+            if not isinstance(info, dict):
+                continue
+            try:
+                app_id = int(app_id_str)
+            except (TypeError, ValueError):
+                continue
+            name = info.get("name")
+            if not isinstance(name, str) or not name.strip():
+                continue
+            result.append(TrendingGame(
+                app_id=app_id,
+                name=name.strip(),
+                source="steamspy",
+            ))
+        return result
 
     @async_retry(max_attempts=2, base_delay=1.0, exceptions=(aiohttp.ClientError, asyncio.TimeoutError))
     async def _fetch_appdetails_with_retry(self, app_id: int) -> dict | None:

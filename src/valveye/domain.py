@@ -98,6 +98,19 @@ class RecommendationItem:
 
 
 @dataclass(slots=True)
+class TrendingGame:
+    """A single entry from a trending / featured list."""
+
+    app_id: int
+    name: str
+    discount_percent: int = 0
+    original_price: float | None = None  # in target currency (e.g. CNY), None = free / unknown
+    final_price: float | None = None
+    currency: str = ""
+    source: str = ""  # "steam_featured" | "steamspy"
+
+
+@dataclass(slots=True)
 class OwnedGame:
     app_id: int
     name: str

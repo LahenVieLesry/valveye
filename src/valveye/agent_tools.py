@@ -237,6 +237,35 @@ def build_tools(price_service: PriceService, recommender: Recommender, game_data
         }, ensure_ascii=False)
 
     @tool
+    async def get_trending_games(category: str = "top_sellers", limit: int = 10, cc: str = "cn") -> str:
+        """获取 Steam 热门游戏列表。
+
+        category 可选值：
+        - top_sellers — 热销商品（默认）
+        - new_releases — 新品推荐
+        - specials — 特惠精选
+        - coming_soon — 即将推出
+
+        返回游戏名称、App ID、折扣信息和价格。数据优先来自 Steam 官方 API，失败时回退到 SteamSpy。
+        当玩家询问「最近有什么热门游戏」「推荐新游戏」「有什么打折」时使用。"""
+        games = await game_data.fetch_trending(category=category, limit=limit, cc=cc)
+        if not games:
+            return "暂时无法获取热门游戏列表，请稍后再试。"
+
+        label = game_data._STEAM_CATEGORY_MAP.get(category, category)
+        lines = [f"🎮 Steam {label}（共 {len(games)} 款）：", ""]
+        for i, g in enumerate(games, 1):
+            line = f"  {i}. {g.name} (AppID: {g.app_id})"
+            if g.discount_percent > 0:
+                orig = f"{g.original_price:.2f}" if g.original_price is not None else "?"
+                final = f"{g.final_price:.2f}" if g.final_price is not None else "免费"
+                line += f" | 💰 {g.currency} {final}（原价 {orig}，-{g.discount_percent}%）"
+            elif g.final_price is not None:
+                line += f" | 💰 {g.currency} {g.final_price:.2f}" if g.final_price > 0 else " | 免费"
+            lines.append(line)
+        return "\n".join(lines)
+
+    @tool
     async def search_by_description(description: str, top_n: int = 10) -> str:
         """根据自然语言描述搜索游戏。当用户描述想要的游戏类型但没有指定具体游戏时使用。
         自动排除玩家已拥有的游戏。
@@ -252,13 +281,13 @@ def build_tools(price_service: PriceService, recommender: Recommender, game_data
             return "未找到匹配的游戏，请尝试更具体的描述。"
         return json.dumps(result, ensure_ascii=False)
 
-    all_tools = [query_low_price, compare_prices, search_similar_candidates, get_game_details, get_game_reviews, recommend_similar_games, subscribe_game, list_subscriptions, request_game_details, search_by_description, get_player_library]
+    all_tools = [query_low_price, compare_prices, search_similar_candidates, get_game_details, get_game_reviews, recommend_similar_games, subscribe_game, list_subscriptions, request_game_details, search_by_description, get_player_library, get_trending_games]
 
     # 按 Agent 分组的工具列表
     tool_map = {t.name: t for t in all_tools}
     tool_groups = {
         "price": [tool_map["query_low_price"], tool_map["compare_prices"]],
-        "info": [tool_map["get_game_details"], tool_map["get_game_reviews"], tool_map["get_player_library"]],
+        "info": [tool_map["get_game_details"], tool_map["get_game_reviews"], tool_map["get_player_library"], tool_map["get_trending_games"]],
         "recommend": [tool_map["search_similar_candidates"], tool_map["recommend_similar_games"], tool_map["request_game_details"], tool_map["search_by_description"]],
         "subs": [tool_map["subscribe_game"], tool_map["list_subscriptions"], tool_map["get_player_library"]],
     }
