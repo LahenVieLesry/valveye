@@ -17,6 +17,7 @@ from mcp.server.stdio import run_server
 from mcp.types import TextContent, Tool
 
 from valveye.cli import build_services
+from valveye.schemas import ToolError
 
 app = Server("valveye")
 
@@ -26,7 +27,7 @@ _services: dict[str, Any] = {}
 
 def _get_services() -> dict[str, Any]:
     if not _services:
-        repo, price_service, recommender, _scheduler, tools, game_data, _notifier, _steam_library = build_services()
+        repo, price_service, recommender, _scheduler, tools, game_data, _notifier, _steam_library, _audit_logger, _user_profile = build_services()
         all_tools, tool_groups = tools
         _services["repo"] = repo
         _services["price_service"] = price_service
@@ -170,6 +171,75 @@ async def list_tools() -> list[Tool]:
                 "required": [],
             },
         ),
+        Tool(
+            name="search_similar_candidates",
+            description=(
+                "Search for games similar to a given game (lightweight candidate list)."
+                " Returns titles, tags, negative ratios, and source signals."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "game": {"type": "string", "description": "Game name (Steam official English name)"},
+                    "top_n": {"type": "integer", "default": 15, "description": "Number of candidates"},
+                },
+                "required": ["game"],
+            },
+        ),
+        Tool(
+            name="search_by_description",
+            description=(
+                "Search games by natural language description."
+                " Example: 'pixel farming game with co-op'."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "description": {"type": "string", "description": "Natural language description"},
+                    "top_n": {"type": "integer", "default": 10, "description": "Number of results"},
+                },
+                "required": ["description"],
+            },
+        ),
+        Tool(
+            name="list_subscriptions",
+            description="List all active price-alert subscriptions.",
+            inputSchema={
+                "type": "object",
+                "properties": {},
+                "required": [],
+            },
+        ),
+        Tool(
+            name="subscribe_game",
+            description=(
+                "Subscribe to price alerts for a game."
+                " Requires channels_json as a JSON array of notification channels."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "user_id": {"type": "string", "description": "User identifier"},
+                    "game": {"type": "string", "description": "Game name (Steam official English name)"},
+                    "channels_json": {"type": "string", "description": 'JSON array like [{"type":"email","to":"user@example.com"}]'},
+                    "window": {"type": "string", "enum": ["all", "12m", "3m"], "default": "all"},
+                    "region": {"type": "string", "default": "", "description": "Region code (auto-detected if empty)"},
+                    "currency": {"type": "string", "default": "", "description": "Currency code (auto-detected if empty)"},
+                },
+                "required": ["user_id", "game", "channels_json"],
+            },
+        ),
+        Tool(
+            name="get_game_details_batch",
+            description="Get detailed info for multiple games (batch version).",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "games": {"type": "string", "description": "Comma-separated English game names"},
+                },
+                "required": ["games"],
+            },
+        ),
     ]
 
 
@@ -187,6 +257,11 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         "get_game_reviews": "get_game_reviews",
         "get_player_library": "get_player_library",
         "get_trending_games": "get_trending_games",
+        "search_similar_candidates": "search_similar_candidates",
+        "search_by_description": "search_by_description",
+        "list_subscriptions": "list_subscriptions",
+        "subscribe_game": "subscribe_game",
+        "get_game_details_batch": "request_game_details",
     }
 
     lc_name = mcp_to_langchain.get(name)
@@ -207,8 +282,10 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         else:
             result = lc_tool.func(**kwargs)
         return [TextContent(type="text", text=str(result))]
+    except ToolError as e:
+        return [TextContent(type="text", text=str(e))]
     except Exception as e:
-        return [TextContent(type="text", text=f"Error: {e}")]
+        return [TextContent(type="text", text=f"❌ 未知错误: {e}")]
 
 
 async def main() -> None:

@@ -118,11 +118,12 @@ class _Candidate:
 
 
 class Recommender:
-    def __init__(self, data_service: GameDataService | None = None, embedding_service=None):
+    def __init__(self, data_service: GameDataService | None = None, embedding_service=None, user_profile_store=None):
         self._data = data_service or GameDataService()
         self._candidate_pool = max(20, settings.steam_recommend_candidate_pool)
         self._negative_review_count = max(1, settings.steam_recommend_negative_review_count)
         self._embedding_service = embedding_service
+        self._user_profile = user_profile_store
 
     async def recommend(self, game_query: str, top_n: int = 10, owned_app_ids: set[int] | None = None) -> list[dict]:
         if not (game_query or "").strip():
@@ -415,6 +416,17 @@ class Recommender:
                 except Exception:
                     pass
 
+            # 7. User profile tag weights (personalization)
+            user_tag_score = 0.0
+            if self._user_profile is not None:
+                try:
+                    user_weights = self._user_profile.get_tag_weights("default")
+                    user_tag_score = sum(
+                        user_weights.get(tag, 0.0) for tag in cand_tags_lower
+                    )
+                except Exception:
+                    pass
+
             # Adjust weights based on whether embeddings are available
             if self._embedding_service and target_emb is not None:
                 final_score = (
@@ -423,7 +435,8 @@ class Recommender:
                     + 0.15 * mlk_score
                     + 0.10 * studio
                     + 0.10 * quality
-                    + 0.10 * tag_overlap
+                    + 0.05 * tag_overlap
+                    + 0.05 * user_tag_score
                 )
             else:
                 final_score = (
@@ -431,7 +444,8 @@ class Recommender:
                     + 0.20 * mlk_score
                     + 0.10 * studio
                     + 0.10 * quality
-                    + 0.10 * tag_overlap
+                    + 0.05 * tag_overlap
+                    + 0.05 * user_tag_score
                 )
 
             inter = sorted(target_tags_lower & cand_tags_lower)
@@ -448,6 +462,7 @@ class Recommender:
                 "studio_affinity": studio,
                 "quality_proximity": quality,
                 "tag_overlap": tag_overlap,
+                "user_profile": user_tag_score,
             }
             if self._embedding_service and target_emb is not None:
                 similarity_breakdown["embedding"] = embed_score

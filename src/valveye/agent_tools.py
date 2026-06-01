@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
+
 import json
 
 from langchain_core.tools import tool
@@ -7,11 +9,44 @@ from langchain_core.tools import tool
 from valveye.game_data import GameDataService
 from valveye.pricing import PriceService, _detect_region, fetch_all_regions
 from valveye.recommendation import Recommender
+from valveye.schemas import ToolError
 from valveye.steam_library import SteamLibraryService
 from valveye.subscriptions import SubscriptionRepository
+from valveye.user_profile import UserProfileStore
 
 
-def build_tools(price_service: PriceService, recommender: Recommender, game_data: GameDataService, repo: SubscriptionRepository, steam_library: SteamLibraryService | None = None):
+# 需要用户确认的工具名集合
+SENSITIVE_TOOLS = {"subscribe_game"}
+
+
+def _format_fallback_chain(chain: list[dict]) -> str:
+    """将 fallback_chain 渲染为易读字符串。"""
+    if not chain:
+        return ""
+    parts = []
+    for item in chain:
+        status = "✅" if item.get("status") == "success" else "❌"
+        source = item.get("source", "?")
+        reason = item.get("reason", "")
+        if reason:
+            parts.append(f"{source} {status} ({reason})")
+        else:
+            parts.append(f"{source} {status}")
+    return " | ".join(parts)
+
+
+PermissionCallback = Callable[[str, dict], Awaitable[tuple[str, str]]] | None
+
+
+def build_tools(
+    price_service: PriceService,
+    recommender: Recommender,
+    game_data: GameDataService,
+    repo: SubscriptionRepository,
+    steam_library: SteamLibraryService | None = None,
+    user_profile_store: UserProfileStore | None = None,
+    permission_callback: PermissionCallback = None,
+):
     @tool
     async def query_low_price(game: str, user_query: str = "", region: str = "", currency: str = "", window: str = "all") -> str:
         """查询某游戏当前价与史低信息，window 支持 all/12m/3m。game 参数必须为 Steam 官方英文名。
@@ -20,14 +55,18 @@ def build_tools(price_service: PriceService, recommender: Recommender, game_data
             region, currency = _detect_region(user_query or game)
         try:
             snapshot = await price_service.fetch_first_available(game_query=game, region=region, currency=currency)
-        except RuntimeError:
-            return f"未找到「{game}」的价格数据，请检查游戏名称是否正确（需使用 Steam 官方英文名）。"
+        except ToolError as e:
+            return str(e)
         decision = price_service.evaluate_low(snapshot=snapshot, window=window)
-        return (
+        chain_str = _format_fallback_chain(snapshot.fallback_chain)
+        lines = [
             f"{snapshot.title} | 当前价 {snapshot.current_price:.2f} {snapshot.currency} | "
             f"史低 {snapshot.historical_low:.2f} {snapshot.currency} | "
-            f"来源 {snapshot.source} | 在史低: {decision.is_at_low}"
-        )
+            f"来源 {snapshot.source} | 在史低: {decision.is_at_low}",
+        ]
+        if chain_str:
+            lines.append(f"数据源尝试: {chain_str}")
+        return "\n".join(lines)
 
     @tool
     async def compare_prices(game: str, user_query: str = "", target_currency: str = "") -> str:
@@ -69,7 +108,12 @@ def build_tools(price_service: PriceService, recommender: Recommender, game_data
             except Exception:
                 pass
         result = await recommender.recommend(game_query=game, top_n=top_n, owned_app_ids=owned_ids)
-        return json.dumps(result, ensure_ascii=False)
+        text = json.dumps(result, ensure_ascii=False)
+        text += (
+            "\n\n以上推荐中，有没有你想排除的游戏，或者希望我多推荐某个类型的？"
+            "回复 `+游戏名` 表示偏好该类，` -游戏名` 表示排除。"
+        )
+        return text
 
     @tool
     async def search_similar_candidates(game: str, top_n: int = 15) -> str:
@@ -158,7 +202,7 @@ def build_tools(price_service: PriceService, recommender: Recommender, game_data
         }, ensure_ascii=False)
 
     @tool
-    def subscribe_game(
+    async def subscribe_game(
         user_id: str,
         game: str,
         channels_json: str,
@@ -169,6 +213,16 @@ def build_tools(price_service: PriceService, recommender: Recommender, game_data
     ) -> str:
         """订阅游戏价格提醒，channels_json 是通知渠道 JSON 数组。
         user_query 为玩家的原始输入（用于自动检测区域），region/currency 留空时自动检测。"""
+        if permission_callback is not None:
+            decision, note = await permission_callback("subscribe_game", {
+                "user_id": user_id, "game": game, "channels_json": channels_json,
+                "window": window, "region": region, "currency": currency,
+            })
+            if decision == "deny":
+                return "❌ 用户已拒绝执行订阅操作。"
+            if decision == "other" and note:
+                return f"⏸ 用户暂停了订阅操作并备注: {note}"
+            # decision == "allow" → continue
         if not region or not currency:
             region, currency = _detect_region(user_query or game)
         try:
@@ -281,14 +335,37 @@ def build_tools(price_service: PriceService, recommender: Recommender, game_data
             return "未找到匹配的游戏，请尝试更具体的描述。"
         return json.dumps(result, ensure_ascii=False)
 
-    all_tools = [query_low_price, compare_prices, search_similar_candidates, get_game_details, get_game_reviews, recommend_similar_games, subscribe_game, list_subscriptions, request_game_details, search_by_description, get_player_library, get_trending_games]
+    @tool
+    async def web_search(query: str, limit: int = 5) -> str:
+        """搜索网络获取游戏新闻、评测等信息。当用户询问游戏评测、新闻、攻略时使用。"""
+        from valveye.web_tools import web_search as _web_search
+        results = await _web_search(query=query, limit=limit)
+        if not results:
+            return "未找到相关网络内容。"
+        lines = [f"🔍 网络搜索结果（{len(results)} 条）：", ""]
+        for i, r in enumerate(results, 1):
+            trusted = "✓ 可信" if r.get("trusted") else ""
+            lines.append(f"{i}. {r.get('title', '')} {trusted}")
+            lines.append(f"   {r.get('url', '')}")
+            lines.append(f"   {r.get('snippet', '')[:200]}")
+            lines.append("")
+        return "\n".join(lines)
+
+    @tool
+    async def web_fetch(url: str, max_length: int = 4000) -> str:
+        """获取指定网页的内容并提取文本。用于深入阅读某篇文章。"""
+        from valveye.web_tools import web_fetch as _web_fetch
+        text = await _web_fetch(url=url, max_length=max_length)
+        return text
+
+    all_tools = [query_low_price, compare_prices, search_similar_candidates, get_game_details, get_game_reviews, recommend_similar_games, subscribe_game, list_subscriptions, request_game_details, search_by_description, get_player_library, get_trending_games, web_search, web_fetch]
 
     # 按 Agent 分组的工具列表
     tool_map = {t.name: t for t in all_tools}
     tool_groups = {
         "price": [tool_map["query_low_price"], tool_map["compare_prices"]],
-        "info": [tool_map["get_game_details"], tool_map["get_game_reviews"], tool_map["get_player_library"], tool_map["get_trending_games"]],
-        "recommend": [tool_map["search_similar_candidates"], tool_map["recommend_similar_games"], tool_map["request_game_details"], tool_map["search_by_description"]],
+        "info": [tool_map["get_game_details"], tool_map["get_game_reviews"], tool_map["get_player_library"], tool_map["get_trending_games"], tool_map["web_search"], tool_map["web_fetch"]],
+        "recommend": [tool_map["search_similar_candidates"], tool_map["recommend_similar_games"], tool_map["request_game_details"], tool_map["search_by_description"], tool_map["web_search"]],
         "subs": [tool_map["subscribe_game"], tool_map["list_subscriptions"], tool_map["get_player_library"]],
     }
 

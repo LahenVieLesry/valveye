@@ -22,6 +22,7 @@ class PriceSnapshot:
     history: list[PricePoint] = field(default_factory=list)
     store: str | None = None
     app_id: int | None = None
+    fallback_chain: list[dict] = field(default_factory=list)
 
 
 @dataclass(slots=True)

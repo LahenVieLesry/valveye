@@ -31,13 +31,14 @@ class ChatStore:
 
     # ── Thread lifecycle ─────────────────────────────────────────────────
 
-    def create_thread(self) -> str:
+    def create_thread(self, context_seed: str = "") -> str:
         thread_id = str(uuid.uuid4())
         data = {
             "thread_id": thread_id,
             "created_at": datetime.now(tz=timezone.utc).isoformat(),
             "title": "新对话",
             "messages": [],
+            "context_seed": context_seed,
         }
         self._write(thread_id, data)
         return thread_id

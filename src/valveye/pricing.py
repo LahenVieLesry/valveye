@@ -12,6 +12,7 @@ import certifi
 from valveye.config import settings
 from valveye.data_sources.base import PriceSource
 from valveye.domain import PriceSnapshot
+from valveye.rate_limiter import AsyncRateLimiter
 from valveye.retry import async_retry
 
 
@@ -365,6 +366,7 @@ async def fetch_all_regions(game_query: str, target_currency: str = "", user_que
     from valveye.data_sources.itad import ITADSource  # 避免循环导入
 
     session = _make_session(15)
+    rate_limiter = AsyncRateLimiter(qps=5.0, burst=3)
     try:
         resolved = await resolve_game(game_query, session=session)
         en_name = resolved.english_name if resolved else game_query
@@ -373,9 +375,12 @@ async def fetch_all_regions(game_query: str, target_currency: str = "", user_que
             _, target_currency = _detect_region(user_query or game_query)
 
         itad = ITADSource()
+        sem = asyncio.Semaphore(5)
 
         async def _fetch_one(region: str, currency: str, label: str) -> dict | None:
-            snapshot = await itad.fetch_price(game_query=en_name, region=region, currency=currency)
+            async with sem:
+                await rate_limiter.acquire()
+                snapshot = await itad.fetch_price(game_query=en_name, region=region, currency=currency)
             if snapshot is None:
                 return None
             return {
@@ -449,25 +454,53 @@ class PriceService:
             self._session = None
 
     async def fetch_first_available(self, game_query: str, region: str, currency: str) -> PriceSnapshot:
+        from valveye.schemas import ToolError, ToolErrorCode
+
         session = await self._get_session()
         resolved = await resolve_game(game_query, session=session)
         query = resolved.english_name if resolved else game_query
         app_id = resolved.app_id if resolved else None
 
+        fallback_chain: list[dict] = []
         last_exc: Exception | None = None
         for source in self.sources:
             try:
                 result = await source.fetch_price(game_query=query, region=region, currency=currency)
                 if result is not None:
                     result.app_id = app_id
+                    fallback_chain.append({
+                        "source": source.source_name,
+                        "status": "success",
+                        "reason": "",
+                    })
+                    result.fallback_chain = fallback_chain
                     return result
+                fallback_chain.append({
+                    "source": source.source_name,
+                    "status": "failed",
+                    "reason": "返回空结果",
+                })
             except Exception as exc:
                 last_exc = exc
+                fallback_chain.append({
+                    "source": source.source_name,
+                    "status": "failed",
+                    "reason": f"{type(exc).__name__}: {exc!s}",
+                })
                 continue
+
         if last_exc is not None:
             exc_name = type(last_exc).__name__
-            raise RuntimeError(f"all price sources failed: {exc_name}: {last_exc!r}") from last_exc
-        raise RuntimeError("all price sources returned no result")
+            raise ToolError(
+                code=ToolErrorCode.PRICE_SOURCE_UNAVAILABLE,
+                message=f"所有价格数据源均不可用，最后错误: {exc_name}: {last_exc!s}",
+                suggestion="请稍后重试，或检查网络连接。",
+            ) from last_exc
+        raise ToolError(
+            code=ToolErrorCode.PRICE_SOURCE_UNAVAILABLE,
+            message="所有价格数据源均未返回结果",
+            suggestion="请检查游戏名称是否为 Steam 官方英文名。",
+        )
 
     @staticmethod
     def evaluate_low(snapshot: PriceSnapshot, window: str, known_notified_low: float | None = None) -> LowPriceDecision:

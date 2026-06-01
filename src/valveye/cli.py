@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import re
 import asyncio
 import dataclasses
 import json
@@ -40,6 +41,8 @@ from valveye.recommendation import Recommender
 from valveye.scheduler import PriceCheckScheduler
 from valveye.steam_library import SteamLibraryService
 from valveye.subscriptions import SubscriptionRepository
+from valveye.tracing import AuditLogger
+from valveye.user_profile import UserProfileStore
 
 # ── Rich console ────────────────────────────────────────────────────────────
 console = Console(highlight=False)
@@ -66,6 +69,7 @@ _SLASH_COMMANDS: dict[str, str] = {
     "/export":    "导出对话记录 · /export [md|json|html]",
     "/resume":    "恢复历史对话",
     "/new":       "开始新对话",
+    "/audit":     "查看操作审计日志 · /audit [tool_name]",
 }
 
 _TOOL_DISPLAY: dict[str, str] = {
@@ -88,6 +92,36 @@ _AGENT_DISPLAY: dict[str, str] = {
     "subs_agent":       "订阅管理",
     "direct":           "助手",
 }
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  Permission manager for sensitive tool calls
+# ═══════════════════════════════════════════════════════════════════════════
+
+class PermissionManager:
+    """Manages user permission decisions for sensitive tool calls.
+
+    Usage:
+        mgr = PermissionManager()
+        # Pass mgr.callback to build_tools()
+        # In event loop, when permission_request arrives:
+        #   mgr.resolve(decision, note)
+    """
+
+    def __init__(self) -> None:
+        self._event = asyncio.Event()
+        self._result: tuple[str, str] = ("allow", "")
+
+    async def callback(self, tool_name: str, inputs: dict) -> tuple[str, str]:
+        """Async callback invoked by sensitive tools before execution."""
+        self._event.clear()
+        await self._event.wait()
+        return self._result
+
+    def resolve(self, decision: str, note: str = "") -> None:
+        """Called by CLI when user makes a permission choice."""
+        self._result = (decision, note)
+        self._event.set()
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -198,6 +232,35 @@ def _build_keybindings(deals_state: list | None = None) -> KeyBindings:
     return kb
 
 
+def _extract_context_seed(chat_store: ChatStore) -> str:
+    """Extract context seed from the most recent thread for cross-session continuity.
+
+    Returns a concise summary of the last few user messages, or empty string
+    if no useful context is found.
+    """
+    threads = chat_store.list_threads()
+    if not threads:
+        return ""
+    prev = chat_store.get_thread(threads[0]["thread_id"])
+    if not prev:
+        return ""
+    msgs = prev.get("messages", [])
+    # Collect last 3 user messages
+    user_msgs = [m["content"] for m in msgs if m.get("role") == "user"][-3:]
+    if not user_msgs:
+        return ""
+    # Simple keyword extraction: look for game names (quoted or capitalized words)
+    seed_parts: list[str] = []
+    for msg in user_msgs:
+        # Try to find game names in quotes
+        quoted = re.findall(r'[「「"]([^"」」]+)["」」]', msg)
+        seed_parts.extend(quoted)
+    if not seed_parts:
+        # Fallback: first 30 chars of last user message
+        seed_parts = [user_msgs[-1][:40]]
+    return f"用户上一轮关注: {'; '.join(seed_parts)}"
+
+
 def _read_key() -> str:
     """Read a single keypress, returning escape sequences for special keys."""
     import termios
@@ -216,6 +279,67 @@ def _read_key() -> str:
         return ch
     finally:
         termios.tcsetattr(fd, termios.TCSADRAIN, old)
+
+
+def _confirm_permission_menu(tool_name: str, inputs: dict) -> tuple[str, str]:
+    """Interactive permission confirmation with arrow-key navigation.
+
+    Returns (decision, note) where decision is "allow", "deny", or "other".
+    """
+    options = [
+        ("allow", "✅ 同意执行", "green"),
+        ("deny", "❌ 拒绝", "red"),
+        ("other", "📝 其他（自定义备注）", "yellow"),
+    ]
+    selected = 0
+
+    display_name = _TOOL_DISPLAY.get(tool_name, tool_name)
+    game = inputs.get("game", "") if isinstance(inputs, dict) else ""
+    header = f"\n  [bold yellow]⚠ 敏感操作请求[/]: {display_name}"
+    if game:
+        header += f" → {game}"
+
+    console.print(header)
+    console.print("  [dim]↑↓ 选择 · Enter 确认 · Esc 取消[/]\n")
+
+    def _render() -> None:
+        for i, (key, label, color) in enumerate(options):
+            prefix = "▸ " if i == selected else "  "
+            style = f"bold {color}" if i == selected else color
+            console.print(f"  {prefix}[{style}]{label}[/]")
+        console.print()
+
+    _render()
+
+    while True:
+        key = _read_key()
+        if key == "\x1b[A":  # Up
+            selected = (selected - 1) % len(options)
+            # Move cursor up to redraw
+            for _ in range(len(options) + 1):
+                console.print("\x1b[1A\x1b[2K", end="")
+            _render()
+        elif key == "\x1b[B":  # Down
+            selected = (selected + 1) % len(options)
+            for _ in range(len(options) + 1):
+                console.print("\x1b[1A\x1b[2K", end="")
+            _render()
+        elif key == "\r" or key == "\n":  # Enter
+            decision = options[selected][0]
+            break
+        elif key == "escape":  # Esc = cancel (deny)
+            decision = "deny"
+            break
+
+    note = ""
+    if decision == "other":
+        console.print("  [dim]请输入备注:[/] ", end="")
+        try:
+            note = input().strip()
+        except (EOFError, KeyboardInterrupt):
+            note = ""
+
+    return decision, note
 
 
 def _switch_menu(chat_store: ChatStore) -> str | None:
@@ -659,6 +783,8 @@ async def _run_agent_turn(
     turn_count: int, fold_state: str = "folded",
     chat_store: ChatStore | None = None,
     memory: VikingMemory | None = None,
+    audit_logger: AuditLogger | None = None,
+    perm_mgr: PermissionManager | None = None,
 ) -> tuple[int, str]:
     """Execute one agent turn.  Returns (new_turn_count, new_fold_state)."""
 
@@ -668,9 +794,13 @@ async def _run_agent_turn(
     thinking_done = False
     _tool_id_counter = 0
     current_agent_label = ""
+    progress_label = ""
+    context_info = ""
 
     def _live_group() -> Group:
         items: list = []
+        if progress_label:
+            items.append(Text(f"  [dim]{progress_label}[/]"))
         if current_agent_label:
             items.append(Text(f"  [bold cyan]▸[/] {current_agent_label}"))
         if not thinking_done:
@@ -689,6 +819,8 @@ async def _run_agent_turn(
                     items.append(Text(f"  [dim]    {summary}[/]"))
         if response_parts:
             items.append(Markdown("".join(response_parts)))
+        if context_info:
+            items.append(Text(f"  {context_info}", style="dim"))
         return Group(*items)
 
     # ── Phase 1: live-stream ─────────────────────────────────────────────
@@ -698,7 +830,7 @@ async def _run_agent_turn(
         refresh_per_second=3,
         transient=True,
     ) as live:
-        async for event in stream_turn(agent, message, thread_id, memory=memory):
+        async for event in stream_turn(agent, message, thread_id, memory=memory, audit_logger=audit_logger, chat_store=chat_store):
             etype = event["type"]
 
             if etype == "agent_start":
@@ -721,6 +853,19 @@ async def _run_agent_turn(
                     response_parts.append(event["content"])
                 live.update(_live_group())
 
+            elif etype == "progress":
+                agent_name = event.get("current", "")
+                agent_count = event.get("agent_count", 0)
+                display = _AGENT_DISPLAY.get(agent_name, agent_name)
+                progress_label = f"[{agent_count}] {display} {event.get('status', '')}"
+                live.update(_live_group())
+
+            elif etype == "context_status":
+                msg_count = event.get("message_count", 0)
+                est_tokens = event.get("estimated_tokens", 0)
+                context_info = f"📊 上下文: {msg_count} 条 / ~{est_tokens} tokens"
+                live.update(_live_group())
+
             elif etype == "tool_start":
                 thinking_done = True
                 _tool_id_counter += 1
@@ -731,6 +876,15 @@ async def _run_agent_turn(
                     "output": "",
                 })
                 live.update(_live_group())
+
+            elif etype == "permission_request":
+                if perm_mgr is not None:
+                    decision, note = await asyncio.get_event_loop().run_in_executor(
+                        None,
+                        lambda: _confirm_permission_menu(event.get("tool", ""), event.get("inputs", {})),
+                    )
+                    perm_mgr.resolve(decision=decision, note=note)
+                    live.update(_live_group())
 
             elif etype == "tool_end":
                 # Find the first unmatched tool call with this name
@@ -828,6 +982,8 @@ async def _handle_slash_command(
     turn_count: int, fold_state: str,
     chat_store: ChatStore | None = None,
     memory: VikingMemory | None = None,
+    audit_logger: AuditLogger | None = None,
+    perm_mgr: PermissionManager | None = None,
 ) -> tuple[int | None, str, str | None]:
     """Handle a slash command. Returns (turn_count_or_None, fold_state, new_thread_id_or_None)."""
     parts = cmd_text.strip().split(maxsplit=1)
@@ -858,7 +1014,7 @@ async def _handle_slash_command(
     if cmd == "/list":
         tc, fs = await _run_agent_turn(
             agent, "请帮我查看当前所有订阅列表", thread_id, turn_count, fold_state,
-            chat_store=chat_store, memory=memory,
+            chat_store=chat_store, memory=memory, audit_logger=audit_logger, perm_mgr=perm_mgr,
         )
         return tc, fs, None
 
@@ -869,7 +1025,7 @@ async def _handle_slash_command(
         tc, fs = await _run_agent_turn(
             agent, f"我想订阅 {arg} 的价格提醒，请引导我完成订阅",
             thread_id, turn_count, fold_state,
-            chat_store=chat_store, memory=memory,
+            chat_store=chat_store, memory=memory, audit_logger=audit_logger, perm_mgr=perm_mgr,
         )
         return tc, fs, None
 
@@ -880,7 +1036,7 @@ async def _handle_slash_command(
         tc, fs = await _run_agent_turn(
             agent, f"查询 {arg} 的当前价格和历史最低价",
             thread_id, turn_count, fold_state,
-            chat_store=chat_store, memory=memory,
+            chat_store=chat_store, memory=memory, audit_logger=audit_logger, perm_mgr=perm_mgr,
         )
         return tc, fs, None
 
@@ -891,7 +1047,7 @@ async def _handle_slash_command(
         tc, fs = await _run_agent_turn(
             agent, f"推荐和 {arg} 类似的游戏",
             thread_id, turn_count, fold_state,
-            chat_store=chat_store, memory=memory,
+            chat_store=chat_store, memory=memory, audit_logger=audit_logger, perm_mgr=perm_mgr,
         )
         return tc, fs, None
 
@@ -929,6 +1085,46 @@ async def _handle_slash_command(
         new_id = chat_store.create_thread()
         console.print("\n  [green]✓[/] 已创建新对话\n")
         return 0, "folded", new_id
+
+    if cmd == "/audit":
+        if audit_logger is None:
+            console.print("  [yellow]审计日志不可用[/]")
+            return turn_count, fold_state, None
+        tool_filter = arg if arg else None
+        rows = audit_logger.query(tool_name=tool_filter, limit=20)
+        if not rows:
+            console.print("  [dim]暂无审计记录[/]")
+            return turn_count, fold_state, None
+        t = Table(
+            show_header=True, header_style="bold", show_lines=False,
+            pad_edge=False, padding=(0, 2),
+        )
+        t.add_column("时间", style="dim", min_width=16)
+        t.add_column("工具", style="cyan", min_width=20)
+        t.add_column("Trace", style="dim", min_width=12)
+        t.add_column("输入", style="dim", min_width=20)
+        t.add_column("耗时(ms)", justify="right", min_width=8)
+        for row in rows:
+            ts = row.get("timestamp", "")[:16].replace("T", " ")
+            inputs = row.get("inputs_json", "") or ""
+            if len(inputs) > 40:
+                inputs = inputs[:40] + "…"
+            t.add_row(
+                ts,
+                row.get("tool_name", "?"),
+                row.get("trace_id", "?")[:8],
+                inputs,
+                f"{row.get('latency_ms', 0):.0f}",
+            )
+        summary = audit_logger.summary()
+        console.print()
+        console.print(Panel(
+            t,
+            title=f"[bold]审计日志[/]  总计 {summary['total_records']} 条 · 错误 {summary['error_count']} 条",
+            border_style="dim", padding=(0, 1),
+        ))
+        console.print()
+        return turn_count, fold_state, None
 
     console.print(f"  [yellow]未知命令[/] {cmd}  ·  输入 [cyan]/help[/] 查看可用命令")
     return turn_count, fold_state, None
@@ -1032,7 +1228,7 @@ async def _stop_openviking_server() -> None:
         pass
 
 
-def build_services():
+def build_services(permission_callback=None):
     repo = SubscriptionRepository(db_path=settings.subscription_db_path)
     sources = [ITADSource(), SteamDBSource(), CheapSharkSource()]
     price_service = PriceService(sources=sources)
@@ -1041,15 +1237,22 @@ def build_services():
         steam_api_key=settings.steam_api_key,
         default_steam_id=settings.steam_id,
     )
-    recommender = Recommender(data_service=game_data)
+    user_profile_store = UserProfileStore()
+    recommender = Recommender(data_service=game_data, user_profile_store=user_profile_store)
     notifier = Notifier()
     scheduler = PriceCheckScheduler(repo=repo, price_service=price_service, notifier=notifier, game_data_service=game_data)
-    tools = build_tools(price_service=price_service, recommender=recommender, game_data=game_data, repo=repo, steam_library=steam_library)
-    return repo, price_service, recommender, scheduler, tools, game_data, notifier, steam_library
+    tools = build_tools(
+        price_service=price_service, recommender=recommender, game_data=game_data,
+        repo=repo, steam_library=steam_library, user_profile_store=user_profile_store,
+        permission_callback=permission_callback,
+    )
+    audit_logger = AuditLogger()
+    return repo, price_service, recommender, scheduler, tools, game_data, notifier, steam_library, audit_logger, user_profile_store
 
 
 async def _run(args: argparse.Namespace) -> int:
-    repo, price_service, recommender, scheduler, tools, game_data, notifier, steam_library = build_services()
+    perm_mgr = PermissionManager()
+    repo, price_service, recommender, scheduler, tools, game_data, notifier, steam_library, audit_logger, user_profile_store = build_services(permission_callback=perm_mgr.callback)
 
     if args.command == "query":
         snapshot = await price_service.fetch_first_available(args.game, args.region, args.currency)
@@ -1133,7 +1336,8 @@ async def _run(args: argparse.Namespace) -> int:
     if args.command == "chat":
         all_tools, tool_groups = tools
         chat_store = ChatStore()
-        thread_id = chat_store.create_thread()
+        context_seed = _extract_context_seed(chat_store)
+        thread_id = chat_store.create_thread(context_seed=context_seed)
 
         # OpenViking 记忆层初始化（自动启动 server）
         # 必须在 build_multi_agent 之前完成，以便 memory 作为闭包传入图节点
@@ -1171,10 +1375,12 @@ async def _run(args: argparse.Namespace) -> int:
                     _ov_started_by_us = False
 
         checkpointer_conn = None
+        context_seed = _extract_context_seed(chat_store) if chat_store else ""
         agent, checkpointer_conn = await build_multi_agent(
             tool_groups,
             get_game_details_fn=tool_groups["info"][0],
             memory=memory,
+            context_seed=context_seed,
         )
 
         try:
@@ -1285,7 +1491,7 @@ async def _run(args: argparse.Namespace) -> int:
                 if user_input.startswith("/"):
                     result, fold_state, new_tid = await _handle_slash_command(
                         user_input, agent, thread_id, turn_count_ref[0], fold_state,
-                        chat_store=chat_store, memory=memory,
+                        chat_store=chat_store, memory=memory, audit_logger=audit_logger, perm_mgr=perm_mgr,
                     )
                     if result is None:
                         break
@@ -1299,7 +1505,7 @@ async def _run(args: argparse.Namespace) -> int:
 
                 turn_count_ref[0], fold_state = await _run_agent_turn(
                     agent, user_input, thread_id, turn_count_ref[0], fold_state,
-                    chat_store=chat_store, memory=memory,
+                    chat_store=chat_store, memory=memory, audit_logger=audit_logger, perm_mgr=perm_mgr,
                 )
 
             return 0

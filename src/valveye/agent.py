@@ -26,7 +26,7 @@ from valveye.prompts import (
     SUPERVISOR_PROMPT,
 )
 from valveye.schemas import SupervisorRouting
-from valveye.tracing import StructuredLogger, Timer, TraceEvent, new_trace_id
+from valveye.tracing import AuditLogger, StructuredLogger, Timer, TraceEvent, new_trace_id
 
 _logger = StructuredLogger("valveye.agent")
 
@@ -46,7 +46,31 @@ class SupervisorState(TypedDict):
     supervisor_response: str
 
 
-# ── LLM builder ───────────────────────────────────────────────────────────
+# ── Kimi-compatible LLM wrapper ───────────────────────────────────────────
+
+class KimiCompatibleChatOpenAI(ChatOpenAI):
+    """ChatOpenAI wrapper that injects missing reasoning_content for Kimi.
+
+    Kimi K2.5/K2.6 with thinking enabled requires ``reasoning_content`` on
+    every assistant message that contains ``tool_calls``. LangChain's
+    ``create_agent`` drops this field when replaying history, causing a 400
+    error on multi-turn tool calls. This wrapper adds an empty string when
+    the field is absent.
+    """
+
+    def _get_request_payload(self, input_, *, stop=None, **kwargs):
+        payload = super()._get_request_payload(input_, stop=stop, **kwargs)
+        for msg in payload.get("messages", []):
+            if (
+                msg.get("role") == "assistant"
+                and msg.get("tool_calls")
+                and "reasoning_content" not in msg
+            ):
+                msg["reasoning_content"] = ""
+        return payload
+
+
+# ── LLM builder ─────────────────────────────────────────────────────────--
 
 def build_llm() -> ChatOpenAI:
     kwargs: dict = {
@@ -56,7 +80,15 @@ def build_llm() -> ChatOpenAI:
     }
     if settings.openai_base_url:
         kwargs["base_url"] = settings.openai_base_url
-    return ChatOpenAI(**kwargs)
+    if settings.openai_user_agent:
+        kwargs["default_headers"] = {"User-Agent": settings.openai_user_agent}
+
+    is_kimi = "kimi" in settings.openai_model.lower() or (
+        settings.openai_base_url
+        and ("kimi" in settings.openai_base_url.lower() or "moonshot" in settings.openai_base_url.lower())
+    )
+    cls = KimiCompatibleChatOpenAI if is_kimi else ChatOpenAI
+    return cls(**kwargs)
 
 
 # ── Multi-agent graph builder ─────────────────────────────────────────────
@@ -65,6 +97,7 @@ async def build_multi_agent(
     tool_groups: dict[str, list],
     get_game_details_fn,
     memory: VikingMemory | None = None,
+    context_seed: str = "",
 ) -> Any:
     """Build the Supervisor + Specialist multi-agent graph."""
     llm = build_llm()
@@ -151,6 +184,12 @@ async def build_multi_agent(
             except Exception:
                 # Structured output not supported by model, fall through
                 pass
+
+        # Defence: some models (e.g. Kimi K2.6) may populate both tasks and
+        # direct_response in structured output.  When tasks exist the intent
+        # has been decomposed, so prefer specialist agents over direct reply.
+        if task_queue and direct_response:
+            direct_response = None
 
         # Fallback: regex-based JSON parsing
         if not task_queue and not direct_response:
@@ -244,6 +283,12 @@ async def build_multi_agent(
                     query = f"[相关记忆]\n{ctx}\n\n[用户消息]\n{query}"
             except Exception:
                 pass  # memory recall failure is non-fatal
+
+        # Cross-session context seed — only for recommend/info agents
+        # price/subs agents should not be distracted by previous session context
+        agent_type = task.get("agent", "info")
+        if context_seed and agent_type in ("recommend", "info"):
+            query = f"[来自上一轮的上下文] {context_seed}\n\n{query}"
 
         return {
             "messages": [HumanMessage(content=query)],
@@ -423,6 +468,8 @@ async def stream_turn(
     thread_id: str,
     memory: VikingMemory | None = None,
     metrics_collector: MetricsCollector | None = None,
+    audit_logger: AuditLogger | None = None,
+    chat_store = None,
 ) -> AsyncIterator[dict]:
     """Execute one turn, yielding structured event dicts.
 
@@ -438,20 +485,35 @@ async def stream_turn(
     trace_id = new_trace_id()
     config = {"configurable": {"thread_id": thread_id, "trace_id": trace_id}, "recursion_limit": 20}
 
-    # Memory recall is now handled inside the graph's pre_process_node,
-    # so we pass the raw message here.
+    # # Build messages list with optional context seed for new threads
+    # messages: list[BaseMessage] = [HumanMessage(content=message)]
+    # if chat_store is not None:
+    #     thread = chat_store.get_thread(thread_id)
+    #     if thread and thread.get("context_seed") and len(thread.get("messages", [])) == 0:
+    #         # Only inject context seed on the very first message of a new thread
+    #         seed = thread["context_seed"]
+    #         messages.insert(0, SystemMessage(content=f"[来自上一轮的上下文] {seed}"))
+
     current_agent = ""
     collected: list[str] = []
     turn_metrics: TurnMetrics | None = None
     tool_outputs: list[str] = []
     in_supervisor = False
     supervisor_tokens: list[str] = []
+    agent_count = 0
 
     if metrics_collector:
         turn_metrics = metrics_collector.start_turn(trace_id, message)
 
     # Emit trace_id so CLI can display it
     yield {"type": "trace_id", "trace_id": trace_id}
+
+    # Emit initial context status (will be updated as turn progresses)
+    yield {
+        "type": "context_status",
+        "message_count": 1,
+        "estimated_tokens": len(message) // 3,
+    }
 
     async for event in agent.astream_events(
         {"messages": [HumanMessage(content=message)]},
@@ -478,9 +540,11 @@ async def stream_turn(
             if current_agent and current_agent != name:
                 yield {"type": "handoff", "from": current_agent, "to": name}
             current_agent = name
-            if turn_metrics:
+            agent_count += 1
+            if turn_metrics and metrics_collector is not None:
                 metrics_collector.record_routing(turn_metrics, name)
-            yield {"type": "agent_start", "agent": name}
+            yield {"type": "agent_start", "agent": name, "agent_count": agent_count}
+            yield {"type": "progress", "current": name, "agent_count": agent_count, "status": "running"}
 
         elif kind == "on_chat_model_stream":
             chunk = event["data"]["chunk"]
@@ -497,7 +561,21 @@ async def stream_turn(
         elif kind == "on_tool_start" and current_agent:
             tool_name = event.get("name", "unknown")
             inputs = event.get("data", {}).get("input", {})
-            yield {"type": "tool_start", "name": tool_name, "agent": current_agent, "inputs": inputs}
+            from valveye.agent_tools import SENSITIVE_TOOLS
+            if tool_name in SENSITIVE_TOOLS:
+                yield {
+                    "type": "permission_request",
+                    "tool": tool_name,
+                    "agent": current_agent,
+                    "inputs": inputs,
+                    "options": [
+                        {"key": "a", "label": "✅ 同意执行"},
+                        {"key": "d", "label": "❌ 拒绝"},
+                        {"key": "o", "label": "📝 其他（自定义备注）"},
+                    ],
+                }
+            else:
+                yield {"type": "tool_start", "name": tool_name, "agent": current_agent, "inputs": inputs}
 
         elif kind == "on_tool_end" and current_agent:
             output_obj = event.get("data", {}).get("output", "")
@@ -507,14 +585,32 @@ async def stream_turn(
                 output = str(output_obj)
             if len(output) > 500:
                 output = output[:500] + "…"
-            if turn_metrics:
+            if turn_metrics and metrics_collector is not None:
                 metrics_collector.record_tool_call(turn_metrics, event.get("name", ""), 0.0)
             tool_outputs.append(output)
             yield {"type": "tool_end", "name": event.get("name", ""), "output": output}
+            # Audit log
+            if audit_logger is not None:
+                audit_logger.log(
+                    trace_id=trace_id,
+                    tool_name=event.get("name", ""),
+                    inputs=event.get("data", {}).get("input", {}),
+                    output=output,
+                    thread_id=thread_id,
+                )
 
         elif kind == "on_tool_error" and current_agent:
             error = str(event.get("data", {}).get("error", "unknown error"))
             yield {"type": "tool_end", "name": event.get("name", ""), "output": f"错误: {error}"}
+            if audit_logger is not None:
+                audit_logger.log(
+                    trace_id=trace_id,
+                    tool_name=event.get("name", ""),
+                    inputs=event.get("data", {}).get("input", {}),
+                    output="",
+                    error_msg=error,
+                    thread_id=thread_id,
+                )
 
         elif kind == "on_chain_end":
             if name == "route_supervisor":
@@ -536,8 +632,50 @@ async def stream_turn(
         if warnings:
             yield {"type": "validation_warning", "warnings": warnings}
 
-    if turn_metrics:
+    if turn_metrics and metrics_collector is not None:
         metrics_collector.end_turn(turn_metrics)
+
+
+# ── Message compression (context summarization) ────────────────────────────
+
+async def _summarize_messages(messages: list[BaseMessage]) -> list[BaseMessage]:
+    """Compress early messages by summarizing them with a lightweight LLM call.
+
+    When message count > 20 or estimated tokens > 8000, summarize the first 50%
+    of messages into a SystemMessage and keep the recent 50% intact.
+    """
+    if len(messages) <= 20:
+        est_tokens = sum(len(m.content) // 3 for m in messages if isinstance(m.content, str))
+        if est_tokens <= 8000:
+            return messages
+
+    split = len(messages) // 2
+    early = messages[:split]
+    recent = messages[split:]
+
+    parts: list[str] = []
+    for m in early:
+        role = "用户" if isinstance(m, HumanMessage) else ("助手" if isinstance(m, AIMessage) else "系统")
+        content = m.content if isinstance(m.content, str) else str(m.content)
+        parts.append(f"[{role}] {content[:300]}")
+    summary_input = "\n".join(parts)
+
+    try:
+        summary_llm = build_llm()
+        prompt = (
+            "请用 300 字以内摘要以下对话的核心内容，保留用户明确表达过的偏好、"
+            "已经确认过的游戏信息、以及未完成的请求。只输出摘要内容，不要加任何前缀。\n\n"
+            f"{summary_input}"
+        )
+        result = await summary_llm.ainvoke([SystemMessage(content=prompt)])
+        summary_text = result.content if isinstance(result.content, str) else str(result.content)
+        summary_text = summary_text.strip()
+    except Exception:
+        summary_text = summary_input[:500] + "…（早期对话摘要）"
+
+    compressed: list[BaseMessage] = [SystemMessage(content=f"[历史摘要] {summary_text}")]
+    compressed.extend(recent)
+    return compressed
 
 
 # ── Non-streaming turn ────────────────────────────────────────────────────

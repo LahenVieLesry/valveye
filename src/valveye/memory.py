@@ -1,6 +1,10 @@
 from __future__ import annotations
 
+import json
 import logging
+import os
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 import aiohttp
@@ -18,11 +22,109 @@ _MEMORY_DIRS = [
 ]
 
 
+class FileMemoryBackend:
+    """Lightweight local file-based memory backend used as fallback when OpenViking is unavailable.
+
+    Stores conversation turns in JSONL files and performs keyword-based recall.
+    """
+
+    def __init__(self, base_dir: str | Path | None = None):
+        if base_dir is None:
+            base_dir = Path.home() / ".valveye" / "memories"
+        self._dir = Path(base_dir)
+        self._dir.mkdir(parents=True, exist_ok=True)
+
+    def _path(self, session_id: str) -> Path:
+        return self._dir / f"{session_id}.jsonl"
+
+    async def ensure_dirs(self) -> None:
+        """Create memory directory structure."""
+        for sub in ("user/memories", "user/preferences", "user/entities", "agent/patterns"):
+            (self._dir / sub).mkdir(parents=True, exist_ok=True)
+
+    async def create_session(self, session_id: str) -> bool:
+        """No-op for file backend — session files are created on first capture."""
+        return True
+
+    async def capture(self, session_id: str, user_msg: str, ai_msg: str) -> None:
+        """Append a conversation turn to the session's JSONL file."""
+        path = self._path(session_id)
+        record = {
+            "timestamp": datetime.now(tz=timezone.utc).isoformat(),
+            "user": user_msg,
+            "assistant": ai_msg,
+        }
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+    async def recall(self, query: str, session_id: str = "", token_budget: int = 2000) -> str:
+        """Keyword-based recall from all session files.
+
+        Simple TF-IDF-like scoring: count keyword overlaps between query and stored messages.
+        """
+        if not query.strip():
+            return ""
+
+        query_words = set(query.lower().split())
+        all_records: list[tuple[float, dict]] = []
+
+        # Read all JSONL files
+        for path in self._dir.glob("*.jsonl"):
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    for line in f:
+                        line = line.strip()
+                        if not line:
+                            continue
+                        try:
+                            record = json.loads(line)
+                        except json.JSONDecodeError:
+                            continue
+                        text = f"{record.get('user', '')} {record.get('assistant', '')}"
+                        text_words = set(text.lower().split())
+                        overlap = len(query_words & text_words)
+                        if overlap > 0:
+                            all_records.append((overlap, record))
+            except OSError:
+                continue
+
+        if not all_records:
+            return ""
+
+        # Sort by overlap score descending
+        all_records.sort(key=lambda x: x[0], reverse=True)
+
+        selected: list[str] = []
+        budget = token_budget
+        for score, record in all_records[:5]:
+            if budget <= 0:
+                break
+            user_text = record.get("user", "")
+            ai_text = record.get("assistant", "")
+            content = f"[用户] {user_text[:200]}\n[助手] {ai_text[:200]}"
+            est_tokens = len(content) // 2
+            selected.append(content)
+            budget -= est_tokens
+
+        return "\n---\n".join(selected) if selected else ""
+
+    async def write_memory(self, uri: str, content: str) -> bool:
+        """Write a memory snippet to a file under the memories directory."""
+        # Map viking URI to local path
+        local_path = self._dir / uri.replace("viking://", "").replace("/", os.sep)
+        local_path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            local_path.write_text(content, encoding="utf-8")
+            return True
+        except OSError:
+            return False
+
+
 class VikingMemory:
     """OpenViking 记忆层封装，提供 auto-recall / auto-capture 能力。
 
     所有方法均为异步，通过 HTTP REST API 与 OpenViking 服务端通信。
-    recall 失败时静默降级（返回空字符串），不影响 Agent 正常工作。
+    recall 失败时自动降级到 FileMemoryBackend（本地文件记忆）。
     """
 
     def __init__(
@@ -39,6 +141,8 @@ class VikingMemory:
         self._session: aiohttp.ClientSession | None = None
         # 记录每个 thread 的轮次计数，用于决定何时 commit
         self._turn_counts: dict[str, int] = {}
+        self._backend: str = "openviking"
+        self._file_backend = FileMemoryBackend()
 
     # ── Lifecycle ────────────────────────────────────────────────────────
 
@@ -63,10 +167,22 @@ class VikingMemory:
         except Exception:
             return False
 
+    async def _select_backend(self) -> None:
+        """Auto-detect backend availability and switch to file fallback if needed."""
+        if self._backend == "openviking":
+            healthy = await self.health_check()
+            if not healthy:
+                logger.warning("OpenViking unavailable, falling back to FileMemoryBackend")
+                self._backend = "file"
+                await self._file_backend.ensure_dirs()
+
     # ── Directory initialization ─────────────────────────────────────────
 
     async def ensure_dirs(self) -> None:
         """首次启动时创建记忆目录结构。"""
+        if self._backend == "file":
+            await self._file_backend.ensure_dirs()
+            return
         session = await self._ensure_session()
         for dir_uri in _MEMORY_DIRS:
             try:
@@ -81,6 +197,9 @@ class VikingMemory:
 
     async def create_session(self, session_id: str) -> bool:
         """创建 OpenViking session，映射到 Valveye thread_id。"""
+        await self._select_backend()
+        if self._backend == "file":
+            return await self._file_backend.create_session(session_id)
         try:
             session = await self._ensure_session()
             async with session.post(
@@ -102,11 +221,12 @@ class VikingMemory:
         """Auto-recall: 从记忆库中语义检索相关记忆。
 
         返回格式化的记忆上下文字符串，可直接注入到 Agent 消息前缀。
-        失败时返回空字符串（静默降级）。
-
-        使用相关度优先选择策略：高分记忆优先保留完整内容，
-        低分记忆按比例截断，确保在 token 预算内最大化信息密度。
+        OpenViking 不可用时自动降级到 FileMemoryBackend。
         """
+        await self._select_backend()
+        if self._backend == "file":
+            return await self._file_backend.recall(query, session_id, self._token_budget)
+
         if not query.strip():
             return ""
         try:
@@ -176,8 +296,9 @@ class VikingMemory:
             return "\n---\n".join(selected) if selected else ""
 
         except Exception as exc:
-            logger.debug("recall failed (degrading gracefully): %s", exc)
-            return ""
+            logger.debug("recall failed (degrading to file backend): %s", exc)
+            self._backend = "file"
+            return await self._file_backend.recall(query, session_id, self._token_budget)
 
     async def _read_with_fallback(self, uri: str) -> str:
         """优先读 L1 overview，失败则读 L0 abstract。"""
@@ -216,7 +337,12 @@ class VikingMemory:
         """Auto-capture: 将本轮对话消息记录到 OpenViking session。
 
         每 commit_interval 轮自动触发一次 commit 提取长期记忆。
+        OpenViking 不可用时降级到 FileMemoryBackend。
         """
+        await self._select_backend()
+        if self._backend == "file":
+            await self._file_backend.capture(session_id, user_msg, ai_msg)
+            return
         try:
             session = await self._ensure_session()
             # 记录用户消息
@@ -240,10 +366,14 @@ class VikingMemory:
                 self._turn_counts[session_id] = 0
 
         except Exception as exc:
-            logger.debug("capture failed (non-critical): %s", exc)
+            logger.debug("capture failed (switching to file backend): %s", exc)
+            self._backend = "file"
+            await self._file_backend.capture(session_id, user_msg, ai_msg)
 
     async def _commit_async(self, session_id: str) -> None:
         """提交 session 触发长期记忆提取（异步，不阻塞）。"""
+        if self._backend == "file":
+            return
         try:
             session = await self._ensure_session()
             async with session.post(
@@ -261,6 +391,9 @@ class VikingMemory:
 
     async def write_memory(self, uri: str, content: str) -> bool:
         """直接写入记忆内容到指定 URI。"""
+        await self._select_backend()
+        if self._backend == "file":
+            return await self._file_backend.write_memory(uri, content)
         try:
             session = await self._ensure_session()
             async with session.post(

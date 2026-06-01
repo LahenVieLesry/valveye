@@ -108,7 +108,8 @@
 \textbullet\;三源容错降级、23 区域异步并发比价 + 实时汇率转换；Rich CLI 交互系统与多渠道消息推送\\
 \textbullet\;设计 12 个领域工具，实现意图分解、任务路由与 Agent Handoff 协作\\
 \textbullet\;集成 ReAct 多步推理与 \cvtag{OpenViking} L0/L1/L2 三层记忆架构（token 利用率 \textbf{+90\%}）\\
-\textbullet\;暴露 \cvtag{MCP} Server 接口，支持外部工具客户端（Claude Code 等）无缝调用
+\textbullet\;暴露 \cvtag{MCP} Server 接口（12 工具全暴露），新增 WebSearch/WebFetch 扩展信息获取\\
+\textbullet\;实现交互式权限确认、操作日志审计、速率限制与用户画像反馈循环等工程化能力
 } & \\
 
 \end{tabularx}
@@ -152,23 +153,24 @@
 \par\smallskip\hangindent=1em\textbullet\;构建\textbf{无数据后门防御框架}：基于 PyTorch 实现孪生模型训练流程，设计 EMA 动量更新与梯度自相关计算模块，支持多种攻击方法的自动化防御评估
 \\
 \\
-
 \textbf{2025.03 -- 至今} & \textbf{Valveye — 智能对话式 Steam 游戏价格助手}\\
-& {\small\color{lightgray} 技术栈：LangChain + LangGraph + OpenViking + OpenAI API + MCP + Python + aiohttp + aiosqlite} \\
+& {\small\color{lightgray} 技术栈：LangChain + LangGraph + OpenViking + API + MCP + Python + aiohttp + aiosqlite} \\
 & \par
 \par\smallskip\hangindent=1em\textbullet\;基于 LangChain + LangGraph 构建\textbf{ Supervisor + 4 Specialist 多 Agent 架构}，设计 12 个领域工具并按 Agent 分组，实现意图分解、任务路由与 Agent 间 Handoff 协作
 \par\smallskip\hangindent=1em\textbullet\;实现\textbf{ ReAct 多步推理}策略（需求理解 → 候选获取 → 深度调查 → 综合推理 → 个性化呈现），支持多轮对话记忆（AsyncSqliteSaver 异步持久化）与结构化流式事件输出
 \par\smallskip\hangindent=1em\textbullet\;集成 OpenViking \textbf{L0/L1/L2 三层渐进式记忆架构}，实现跨会话自动召回与长期记忆捕获
 \par\smallskip\hangindent=1em\textbullet\;设计\textbf{多数据源容错}机制（ITAD/SteamDB/CheapShark 三源降级），23 个区域异步并发比价（asyncio.gather）+ 实时汇率转换
 \par\smallskip\hangindent=1em\textbullet\;构建\textbf{完整 CLI 交互系统}：Rich Markdown 渲染、Agent 思考过程实时流式展示、对话持久化与多格式导出（Markdown/JSON/HTML）
-\par\smallskip\hangindent=1em\textbullet\;实现\textbf{定时价格监控}调度（APScheduler）与 7 渠道富文本消息推送（Email、Telegram、Discord、企业微信/飞书/钉钉、QQ）
-\par\smallskip\hangindent=1em\textbullet\;暴露 \textbf{MCP Server} 标准接口，支持外部工具客户端无缝调用；实现 Steam 热门游戏实时查询（热销/新品/特惠/即将推出）
+\par\smallskip\hangindent=1em\textbullet\;实现\textbf{定时价格监控}调度（APScheduler）与 多渠道富文本消息推送
+\par\smallskip\hangindent=1em\textbullet\;暴露 \textbf{MCP Server} 标准接口（12 个工具全暴露），支持外部工具客户端无缝调用；新增 WebSearch/WebFetch 工具扩展信息获取能力
+\par\smallskip\hangindent=1em\textbullet\;设计\textbf{结构化错误码}体系与数据源降级透明化（ITAD/SteamDB/CheapShark 链路可视化），引入异步令牌桶限流器保障 API 稳定性
+\par\smallskip\hangindent=1em\textbullet\;实现\textbf{交互式权限确认}（上下键菜单）、操作日志审计（SQLite 持久化 + /audit 查询）、任务进度展示与上下文窗口可视化
+\par\smallskip\hangindent=1em\textbullet\;构建\textbf{用户画像反馈循环}：记录用户对推荐结果的 like/dislike，动态调整标签权重；OpenViking 不可用时自动降级到本地文件记忆后端
 \\
 \end{tabularx}
 
 \section{科研成果}
-
-\vspace{2pt}
+% \vspace{2pt}
 \begin{enumerate}[leftmargin=*, after=\strut, label={[\arabic*]}]
 
     \item \textbf{CBA: Backdoor Attack on Deep Speech Classification via Audio Compression}\\

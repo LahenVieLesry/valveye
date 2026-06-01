@@ -11,6 +11,7 @@ import certifi
 from valveye.config import settings
 from valveye.domain import GameProfile, TrendingGame
 from valveye.pricing import resolve_game
+from valveye.rate_limiter import AsyncRateLimiter
 from valveye.retry import async_retry
 
 _MORE_LIKE_APP_RE = re.compile(r"/app/(\d+)")
@@ -32,6 +33,7 @@ class GameDataService:
         self._session: aiohttp.ClientSession | None = None
         self._cache: OrderedDict[int, GameProfile] = OrderedDict()
         self._cache_size = cache_size
+        self._rate_limiter = AsyncRateLimiter(qps=5.0, burst=2)
 
     async def _get_session(self) -> aiohttp.ClientSession:
         if self._session is None or self._session.closed:
@@ -66,6 +68,7 @@ class GameDataService:
         """Search Steam Store by term."""
         if not term.strip():
             return []
+        await self._rate_limiter.acquire()
         session = await self._get_session()
         url = f"{settings.steam_store_base_url.rstrip('/')}/api/storesearch"
         try:
@@ -83,6 +86,7 @@ class GameDataService:
 
     async def fetch_appdetails(self, app_id: int) -> dict | None:
         """Fetch raw appdetails from Steam Store."""
+        await self._rate_limiter.acquire()
         session = await self._get_session()
         url = f"{settings.steam_store_base_url.rstrip('/')}/api/appdetails"
         try:
@@ -103,6 +107,7 @@ class GameDataService:
 
     async def fetch_steamspy(self, app_id: int) -> dict | None:
         """Fetch SteamSpy details for an app."""
+        await self._rate_limiter.acquire()
         session = await self._get_session()
         url = f"{settings.steamspy_api_base_url.rstrip('/')}/api.php"
         try:
@@ -116,6 +121,7 @@ class GameDataService:
 
     async def fetch_more_like_this_ids(self, app_id: int) -> list[int]:
         """Fetch Steam's 'More Like This' recommended app IDs."""
+        await self._rate_limiter.acquire()
         session = await self._get_session()
         url = f"{settings.steam_store_base_url.rstrip('/')}/recommended/morelike/app/{app_id}"
         try:
@@ -141,6 +147,7 @@ class GameDataService:
         self, app_id: int, review_type: str = "negative", count: int = 3
     ) -> list[str]:
         """Fetch review text snippets. review_type: 'negative' or 'positive'."""
+        await self._rate_limiter.acquire()
         session = await self._get_session()
         url = f"{settings.steam_store_base_url.rstrip('/')}/appreviews/{app_id}"
         try:
