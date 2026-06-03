@@ -55,6 +55,10 @@ class RoutingTask(BaseModel):
         pattern=r"^(price|info|recommend|subs)$",
     )
     query: str = Field(description="Refined query for the agent to execute")
+    depends_on: list[int] = Field(
+        default=[],
+        description="此任务依赖的任务索引列表，空数组表示无依赖",
+    )
 
 
 class SupervisorRouting(BaseModel):

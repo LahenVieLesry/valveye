@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json as _json
 import operator
 import re
@@ -9,10 +10,19 @@ from typing import Annotated, Any, TypedDict
 
 import aiosqlite
 from langchain.agents import create_agent
-from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
+from langchain_core.messages import (
+    AIMessage,
+    BaseMessage,
+    HumanMessage,
+    RemoveMessage,
+    SystemMessage,
+    ToolMessage,
+)
 from langchain_openai import ChatOpenAI
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from langgraph.graph import END, START, StateGraph
+from langgraph.graph.message import add_messages
+
 
 from valveye.config import settings
 from valveye.guardrails import ResponseValidator
@@ -34,7 +44,7 @@ _logger = StructuredLogger("valveye.agent")
 # ── State schema ───────────────────────────────────────────────────────────
 
 class SupervisorState(TypedDict):
-    messages: Annotated[list[BaseMessage], operator.add]
+    messages: Annotated[list[BaseMessage], add_messages]
     active_agent: str
     task_queue: list[dict]
     current_task_index: int
@@ -44,6 +54,10 @@ class SupervisorState(TypedDict):
     handoff_pending: bool
     trace_id: str
     supervisor_response: str
+    context_summary: str
+    # 功能2新增字段
+    parallel_results: Annotated[list[dict], operator.add]
+    execution_mode: str
 
 
 # ── Kimi-compatible LLM wrapper ───────────────────────────────────────────
@@ -89,6 +103,58 @@ def build_llm() -> ChatOpenAI:
     )
     cls = KimiCompatibleChatOpenAI if is_kimi else ChatOpenAI
     return cls(**kwargs)
+
+
+def aggregate_results_node(state: SupervisorState) -> dict:
+    """合并所有并行分支的结果为单一 AIMessage。"""
+    from collections import defaultdict
+
+    results = state.get("parallel_results", [])
+    if not results:
+        return {
+            "messages": [AIMessage(content="未能获取任何结果。")],
+            "execution_mode": "aggregated",
+            "active_agent": "finish",
+        }
+
+    # 按 agent 分组，组内按 task_id 排序
+    agent_results: dict[str, list[dict]] = defaultdict(list)
+    for r in results:
+        agent_results[r["agent"]].append(r)
+    for agent_key in agent_results:
+        agent_results[agent_key].sort(key=lambda x: x.get("task_id", -1))
+
+    parts = []
+    agent_order = ["price", "info", "recommend", "subs"]
+    display_names = {
+        "price": "价格查询",
+        "info": "游戏信息",
+        "recommend": "游戏推荐",
+        "subs": "订阅管理",
+    }
+
+    for agent_key in agent_order:
+        if agent_key not in agent_results:
+            continue
+        results_for_agent = agent_results[agent_key]
+        label = display_names.get(agent_key, agent_key)
+
+        if len(results_for_agent) == 1:
+            parts.append(f"**{label}**\n{results_for_agent[0]['response']}")
+        else:
+            for i, r in enumerate(results_for_agent, 1):
+                sub_label = f"{label} ({i})"
+                query_hint = r.get("query", "")
+                if query_hint:
+                    sub_label += f" — {query_hint[:40]}"
+                parts.append(f"**{sub_label}**\n{r['response']}")
+
+    combined = "\n\n---\n\n".join(parts)
+    return {
+        "messages": [AIMessage(content=combined)],
+        "execution_mode": "aggregated",
+        "active_agent": "finish",
+    }
 
 
 # ── Multi-agent graph builder ─────────────────────────────────────────────
@@ -178,9 +244,14 @@ async def build_multi_agent(
                 # Check for direct response
                 if routing.direct_response:
                     direct_response = routing.direct_response
-                for t in routing.tasks:
+                for i, t in enumerate(routing.tasks):
                     if t.agent in ("price", "info", "recommend", "subs"):
-                        task_queue.append({"agent": t.agent, "query": t.query or content})
+                        task_queue.append({
+                            "agent": t.agent,
+                            "query": t.query or content,
+                            "depends_on": t.depends_on or [],
+                            "task_id": i,
+                        })
             except Exception:
                 # Structured output not supported by model, fall through
                 pass
@@ -205,17 +276,22 @@ async def build_multi_agent(
                 if json_match:
                     data = _json.loads(json_match.group())
                     tasks = data.get("tasks", [])
-                    for t in tasks:
+                    for i, t in enumerate(tasks):
                         agent_name = t.get("agent", "info")
                         if agent_name in ("price", "info", "recommend", "subs"):
-                            task_queue.append({"agent": agent_name, "query": t.get("query", content)})
+                            task_queue.append({
+                                "agent": agent_name,
+                                "query": t.get("query", content),
+                                "depends_on": t.get("depends_on", []) or [],
+                                "task_id": i,
+                            })
             except (ValueError, TypeError):
                 pass
 
         # Fallback: keyword-based routing
         if not task_queue and not direct_response:
             fallback_agent = _keyword_fallback(content)
-            task_queue = [{"agent": fallback_agent, "query": content}]
+            task_queue = [{"agent": fallback_agent, "query": content, "task_id": 0}]
 
         trace_id = state.get("trace_id", new_trace_id())
         _logger.emit(TraceEvent(
@@ -240,19 +316,27 @@ async def build_multi_agent(
                 "supervisor_response": direct_response,
             }
 
+        # 分析并行可行性
+        execution_mode = "serial"
+        if len(task_queue) > 1:
+            has_deps = any(len(t.get("depends_on", [])) > 0 for t in task_queue)
+            if not has_deps:
+                execution_mode = "parallel"
+
         return {
-            "active_agent": task_queue[0]["agent"],
+            "active_agent": task_queue[0]["agent"] if task_queue else "finish",
             "task_queue": task_queue,
             "current_task_index": 0,
             "original_query": content,
             "trace_id": trace_id,
+            "execution_mode": execution_mode,
         }
 
     def route_to_agent(state: SupervisorState) -> str:
         """Read current task from queue, return agent node name."""
         active = state.get("active_agent", "info")
         if active == "direct":
-            return "direct"
+            return "direct_respond"
         queue = state.get("task_queue", [])
         idx = state.get("current_task_index", 0)
         if queue and idx < len(queue):
@@ -398,37 +482,177 @@ async def build_multi_agent(
         # Handoff: route to handoff target (e.g. recommend → info for details)
         return f"{active}_agent"
 
+    # ── Parallel execution nodes ──────────────────────────────────────────────
+
+    def route_from_supervisor(state: SupervisorState) -> str:
+        """Decide serial or parallel execution after supervisor routing."""
+        if state.get("execution_mode") == "parallel":
+            return "parallel_dispatch"
+
+        active = state.get("active_agent", "info")
+        if active == "direct":
+            return "direct_respond"
+        return "pre_process"
+
+    async def parallel_dispatch_node(state: SupervisorState) -> dict:
+        """并行调度所有 specialist agent，使用 asyncio.gather 在单节点内完成。
+
+        避免 LangGraph Send API 的 fan-in 不确定性：所有 agent 在节点内部并行执行，
+        结果一次性收集到 parallel_results，然后由 aggregate_results 合并。
+        """
+        tasks = state.get("task_queue", [])
+        # 只提取 SystemMessage（上下文摘要等系统注入信息），排除原始用户输入
+        system_msgs = [m for m in state["messages"] if isinstance(m, SystemMessage)]
+
+        agent_map = {
+            "price": price_agent,
+            "info": info_agent,
+            "recommend": recommend_agent,
+            "subs": subs_agent,
+        }
+
+        async def _run_one(task: dict) -> dict:
+            agent_name = task.get("agent", "info")
+            query = task.get("query", "")
+            target_agent = agent_map.get(agent_name, info_agent)
+
+            # 只传递系统上下文 + supervisor 专属指令，不传原始多意图用户输入
+            input_messages: list[BaseMessage] = list(system_msgs)
+            input_messages.append(HumanMessage(content=query))
+
+            try:
+                result = await target_agent.ainvoke(
+                    {"messages": input_messages},
+                    config={"recursion_limit": 15},
+                )
+                result_messages = result.get("messages", [])
+                ai_msgs = [m for m in result_messages if isinstance(m, AIMessage)]
+                response = ai_msgs[-1].content if ai_msgs else ""
+                if isinstance(response, list) and response:
+                    response = str(response[0])
+            except Exception as e:
+                response = f"执行出错: {e}"
+
+            return {
+                "task_id": task.get("task_id", -1),
+                "agent": agent_name,
+                "query": query,
+                "response": response,
+            }
+
+        results = await asyncio.gather(*[_run_one(t) for t in tasks])
+
+        return {
+            "parallel_results": results,
+        }
+
+
+    async def summarize_node(state: SupervisorState) -> dict:
+        """自动压缩过长的消息历史。
+
+        触发条件：消息数 > 20 或预估 token > 100000。
+        安全规则：不截断未完成的 tool_call 对；保留最近 6 条消息。
+        """
+        messages = state["messages"]
+        if len(messages) <= 20:
+            est_tokens = sum(
+                len(m.content) // 3 for m in messages if isinstance(m.content, str)
+            )
+            if est_tokens <= 100000:
+                return {}
+
+        # 保留最近 6 条作为"热上下文"
+        keep_recent = 6
+        safe_split = max(len(messages) // 2, keep_recent)
+
+        # 安全边界：确保 split 点不在 tool_call 中间
+        while safe_split < len(messages) - keep_recent:
+            msg_at_split = messages[safe_split - 1]
+            msg_after = messages[safe_split]
+            if (
+                isinstance(msg_at_split, AIMessage)
+                and getattr(msg_at_split, "tool_calls", None)
+                and isinstance(msg_after, ToolMessage)
+            ):
+                safe_split += 1 + len(msg_at_split.tool_calls)
+                continue
+            break
+
+        early = messages[:safe_split]
+
+        # 生成摘要
+        parts = []
+        for m in early:
+            role = (
+                "用户"
+                if isinstance(m, HumanMessage)
+                else ("助手" if isinstance(m, AIMessage) else "系统")
+            )
+            content = m.content if isinstance(m.content, str) else str(m.content)
+            parts.append(f"[{role}] {content[:300]}")
+        summary_input = "\n".join(parts)
+
+        try:
+            summary_llm = build_llm()
+            prompt = (
+                "请用 300 字以内摘要以下对话的核心内容，保留用户明确表达过的偏好、"
+                "已经确认过的游戏信息、以及未完成的请求。只输出摘要内容，不要加任何前缀。\n\n"
+                f"{summary_input}"
+            )
+            result = await summary_llm.ainvoke([SystemMessage(content=prompt)])
+            summary_text = (
+                result.content.strip()
+                if isinstance(result.content, str)
+                else str(result.content)
+            )
+        except Exception:
+            summary_text = summary_input[:500] + "…（早期对话摘要）"
+
+        # 使用 RemoveMessage 删除早期消息，追加摘要 SystemMessage
+        removes = [RemoveMessage(id=m.id) for m in early if m.id]
+        summary_msg = SystemMessage(content=f"[历史摘要] {summary_text}")
+
+        return {
+            "messages": removes + [summary_msg],
+            "context_summary": summary_text,
+        }
+
     # --- Build graph ---
     builder = StateGraph(SupervisorState)
 
-    # Routing node
-    builder.add_node("route_supervisor", route_supervisor)
-    builder.add_node("pre_process", pre_process_node)
+    # 功能1: 上下文压缩节点
+    builder.add_node("summarize", summarize_node)
 
-    # Specialist agent nodes (compiled subgraphs)
+    # Supervisor 路由
+    builder.add_node("route_supervisor", route_supervisor)
+
+    # 串行路径节点
+    builder.add_node("pre_process", pre_process_node)
     builder.add_node("price_agent", price_agent)
     builder.add_node("info_agent", info_agent)
     builder.add_node("recommend_agent", recommend_agent)
     builder.add_node("subs_agent", subs_agent)
-
-    # Post-processing
     builder.add_node("post_process", post_process_node)
-
-    # Direct response (supervisor handles simple messages)
     builder.add_node("direct_respond", direct_respond_node)
 
+    # 功能2: 并行包装和聚合
+    builder.add_node("parallel_dispatch", parallel_dispatch_node)
+    builder.add_node("aggregate_results", aggregate_results_node)
+
     # --- Edges ---
-    builder.add_edge(START, "route_supervisor")
-    builder.add_conditional_edges("route_supervisor", route_to_agent, {
-        "price_agent": "pre_process",
-        "info_agent": "pre_process",
-        "recommend_agent": "pre_process",
-        "subs_agent": "pre_process",
-        "direct": "direct_respond",
+    # 功能1: START → summarize → route_supervisor
+    builder.add_edge(START, "summarize")
+    builder.add_edge("summarize", "route_supervisor")
+
+    # 功能2: route_supervisor 后选择串行或并行
+    builder.add_conditional_edges("route_supervisor", route_from_supervisor, {
+        "parallel_dispatch": "parallel_dispatch",
+        "direct_respond": "direct_respond",
+        "pre_process": "pre_process",
     })
     builder.add_edge("direct_respond", END)
 
-    # After pre_process, route to the correct agent
+    # 串行路径
     builder.add_conditional_edges("pre_process", route_to_agent, {
         "price_agent": "price_agent",
         "info_agent": "info_agent",
@@ -442,7 +666,7 @@ async def build_multi_agent(
     builder.add_edge("recommend_agent", "post_process")
     builder.add_edge("subs_agent", "post_process")
 
-    # After post_process → route or end
+    # After post_process → 继续串行或结束
     builder.add_conditional_edges("post_process", route_after_post_process, {
         "price_agent": "pre_process",
         "info_agent": "pre_process",
@@ -450,6 +674,10 @@ async def build_multi_agent(
         "subs_agent": "pre_process",
         "__end__": END,
     })
+
+    # 并行路径: parallel_dispatch → aggregate_results → END
+    builder.add_edge("parallel_dispatch", "aggregate_results")
+    builder.add_edge("aggregate_results", END)
 
     # --- Compile with checkpointer ---
     conn = await aiosqlite.connect(settings.chat_db_path)
@@ -535,7 +763,7 @@ async def stream_turn(
                 yield {"type": "token", "content": t}
             continue
 
-        # Detect specialist agent transitions
+        # Detect specialist agent transitions (serial path)
         if kind == "on_chain_start" and name in _AGENT_NAMES:
             if current_agent and current_agent != name:
                 yield {"type": "handoff", "from": current_agent, "to": name}
@@ -545,6 +773,9 @@ async def stream_turn(
                 metrics_collector.record_routing(turn_metrics, name)
             yield {"type": "agent_start", "agent": name, "agent_count": agent_count}
             yield {"type": "progress", "current": name, "agent_count": agent_count, "status": "running"}
+
+        elif kind == "on_chain_start" and name == "aggregate_results":
+            yield {"type": "parallel_complete", "status": "aggregating"}
 
         elif kind == "on_chat_model_stream":
             chunk = event["data"]["chunk"]
@@ -563,11 +794,13 @@ async def stream_turn(
             inputs = event.get("data", {}).get("input", {})
             from valveye.agent_tools import SENSITIVE_TOOLS
             if tool_name in SENSITIVE_TOOLS:
+                current_task = asyncio.current_task()
                 yield {
                     "type": "permission_request",
                     "tool": tool_name,
                     "agent": current_agent,
                     "inputs": inputs,
+                    "task_id": id(current_task) if current_task else None,
                     "options": [
                         {"key": "a", "label": "✅ 同意执行"},
                         {"key": "d", "label": "❌ 拒绝"},
@@ -615,9 +848,22 @@ async def stream_turn(
         elif kind == "on_chain_end":
             if name == "route_supervisor":
                 in_supervisor = False
+            elif name == "summarize":
+                state_data = event.get("data", {}).get("output", {})
+                summary = state_data.get("context_summary", "")
+                if summary:
+                    yield {"type": "context_compressed", "summary": summary}
             elif name in _AGENT_NAMES:
                 yield {"type": "agent_end", "agent": name}
                 current_agent = ""
+            elif name == "aggregate_results":
+                yield {"type": "parallel_complete", "status": "done"}
+                # 提取合并后的回复文本并 yield 为 token，确保 response_parts 被填充
+                output = event.get("data", {}).get("output", {})
+                for m in output.get("messages", []):
+                    if isinstance(m, AIMessage) and m.content:
+                        yield {"type": "token", "content": m.content}
+                        break
 
     # Auto-Capture and validation
     if memory and collected:
@@ -634,48 +880,6 @@ async def stream_turn(
 
     if turn_metrics and metrics_collector is not None:
         metrics_collector.end_turn(turn_metrics)
-
-
-# ── Message compression (context summarization) ────────────────────────────
-
-async def _summarize_messages(messages: list[BaseMessage]) -> list[BaseMessage]:
-    """Compress early messages by summarizing them with a lightweight LLM call.
-
-    When message count > 20 or estimated tokens > 8000, summarize the first 50%
-    of messages into a SystemMessage and keep the recent 50% intact.
-    """
-    if len(messages) <= 20:
-        est_tokens = sum(len(m.content) // 3 for m in messages if isinstance(m.content, str))
-        if est_tokens <= 8000:
-            return messages
-
-    split = len(messages) // 2
-    early = messages[:split]
-    recent = messages[split:]
-
-    parts: list[str] = []
-    for m in early:
-        role = "用户" if isinstance(m, HumanMessage) else ("助手" if isinstance(m, AIMessage) else "系统")
-        content = m.content if isinstance(m.content, str) else str(m.content)
-        parts.append(f"[{role}] {content[:300]}")
-    summary_input = "\n".join(parts)
-
-    try:
-        summary_llm = build_llm()
-        prompt = (
-            "请用 300 字以内摘要以下对话的核心内容，保留用户明确表达过的偏好、"
-            "已经确认过的游戏信息、以及未完成的请求。只输出摘要内容，不要加任何前缀。\n\n"
-            f"{summary_input}"
-        )
-        result = await summary_llm.ainvoke([SystemMessage(content=prompt)])
-        summary_text = result.content if isinstance(result.content, str) else str(result.content)
-        summary_text = summary_text.strip()
-    except Exception:
-        summary_text = summary_input[:500] + "…（早期对话摘要）"
-
-    compressed: list[BaseMessage] = [SystemMessage(content=f"[历史摘要] {summary_text}")]
-    compressed.extend(recent)
-    return compressed
 
 
 # ── Non-streaming turn ────────────────────────────────────────────────────

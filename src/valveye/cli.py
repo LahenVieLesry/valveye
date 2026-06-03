@@ -99,29 +99,90 @@ _AGENT_DISPLAY: dict[str, str] = {
 # ═══════════════════════════════════════════════════════════════════════════
 
 class PermissionManager:
-    """Manages user permission decisions for sensitive tool calls.
-
-    Usage:
-        mgr = PermissionManager()
-        # Pass mgr.callback to build_tools()
-        # In event loop, when permission_request arrives:
-        #   mgr.resolve(decision, note)
-    """
+    """Manages user permission decisions with per-task isolation + sequential queue."""
 
     def __init__(self) -> None:
-        self._event = asyncio.Event()
-        self._result: tuple[str, str] = ("allow", "")
+        # task -> Event mapping for concurrent branches
+        self._pending: dict[asyncio.Task, asyncio.Event] = {}
+        self._results: dict[asyncio.Task, tuple[str, str]] = {}
+        # Queue for sequential confirmation (FIFO)
+        self._queue: asyncio.Queue[dict | None] = asyncio.Queue()
+        self._worker_task: asyncio.Task | None = None
 
     async def callback(self, tool_name: str, inputs: dict) -> tuple[str, str]:
-        """Async callback invoked by sensitive tools before execution."""
-        self._event.clear()
-        await self._event.wait()
-        return self._result
+        """Async callback invoked by sensitive tools before execution.
 
-    def resolve(self, decision: str, note: str = "") -> None:
-        """Called by CLI when user makes a permission choice."""
-        self._result = (decision, note)
-        self._event.set()
+        Each concurrent branch registers itself via asyncio.current_task()
+        and waits on its own Event. The CLI permission worker will resolve
+        them one by one in queue order.
+        """
+        task = asyncio.current_task()
+        if task is None:
+            return ("allow", "")
+
+        event = asyncio.Event()
+        self._pending[task] = event
+        self._results[task] = ("allow", "")
+
+        await event.wait()
+        result = self._results.pop(task, ("allow", ""))
+        self._pending.pop(task, None)
+        return result
+
+    def enqueue(self, event_dict: dict) -> None:
+        """Called by CLI when a permission_request event arrives.
+
+        The event is put into a FIFO queue; a background worker will
+        pop and process them one at a time so the user never sees
+        overlapping permission prompts.
+        """
+        self._queue.put_nowait(event_dict)
+
+    async def _worker(self, resolve_fn) -> None:
+        """Background worker: processes permission requests sequentially."""
+        while True:
+            event_dict = await self._queue.get()
+            if event_dict is None:  # poison pill
+                break
+
+            # Find the target task that issued this request
+            task_id = event_dict.get("task_id")
+            target_task = None
+            if task_id is not None:
+                for t in self.get_pending_tasks():
+                    if id(t) == task_id:
+                        target_task = t
+                        break
+
+            # Call the UI resolve function (blocking input in executor)
+            await resolve_fn(event_dict, target_task)
+
+    def start_worker(self, resolve_fn) -> None:
+        """Start the sequential permission worker (call once per turn)."""
+        if self._worker_task is None or self._worker_task.done():
+            self._worker_task = asyncio.create_task(self._worker(resolve_fn))
+
+    def stop_worker(self) -> None:
+        """Signal the worker to exit."""
+        if self._worker_task and not self._worker_task.done():
+            self._queue.put_nowait(None)
+
+    def resolve(self, decision: str, note: str = "", *, target_task: asyncio.Task | None = None) -> None:
+        """Resolve a specific task (called by the worker after user confirms)."""
+        if target_task is not None:
+            if target_task in self._pending:
+                self._results[target_task] = (decision, note)
+                self._pending[target_task].set()
+            return
+
+        # Fallback: resolve all pending (serial mode compatibility)
+        for task, event in list(self._pending.items()):
+            self._results[task] = (decision, note)
+            event.set()
+
+    def get_pending_tasks(self) -> list[asyncio.Task]:
+        """Return list of tasks currently waiting for permission."""
+        return list(self._pending.keys())
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -823,6 +884,21 @@ async def _run_agent_turn(
             items.append(Text(f"  {context_info}", style="dim"))
         return Group(*items)
 
+    # ── Permission worker (功能2: 顺序确认队列) ───────────────────────────
+    async def _resolve_permission_ui(event_dict: dict, target_task: asyncio.Task | None) -> None:
+        """Show permission menu and resolve the exact target task."""
+        decision, note = await asyncio.get_event_loop().run_in_executor(
+            None,
+            lambda: _confirm_permission_menu(
+                event_dict.get("tool", ""), event_dict.get("inputs", {})
+            ),
+        )
+        if perm_mgr is not None:
+            perm_mgr.resolve(decision=decision, note=note, target_task=target_task)
+
+    if perm_mgr is not None:
+        perm_mgr.start_worker(resolve_fn=_resolve_permission_ui)
+
     # ── Phase 1: live-stream ─────────────────────────────────────────────
     with Live(
         Group(Text("  [magenta]💭[/]  思考中…", style="dim")),
@@ -866,6 +942,12 @@ async def _run_agent_turn(
                 context_info = f"📊 上下文: {msg_count} 条 / ~{est_tokens} tokens"
                 live.update(_live_group())
 
+            elif etype == "context_compressed":
+                summary_preview = event.get("summary", "")[:50]
+                items = _live_group().renderables
+                items.append(Text(f"  [dim yellow]🗜 上下文已压缩: {summary_preview}…[/]"))
+                live.update(Group(*items))
+
             elif etype == "tool_start":
                 thinking_done = True
                 _tool_id_counter += 1
@@ -879,12 +961,15 @@ async def _run_agent_turn(
 
             elif etype == "permission_request":
                 if perm_mgr is not None:
-                    decision, note = await asyncio.get_event_loop().run_in_executor(
-                        None,
-                        lambda: _confirm_permission_menu(event.get("tool", ""), event.get("inputs", {})),
-                    )
-                    perm_mgr.resolve(decision=decision, note=note)
+                    # 入队，由后台 worker 顺序处理
+                    perm_mgr.enqueue(event)
                     live.update(_live_group())
+
+            # 功能2: 并行聚合事件
+            elif etype == "parallel_complete":
+                items = _live_group().renderables
+                items.append(Text("  [dim cyan]⟳ 合并并行结果…[/]"))
+                live.update(Group(*items))
 
             elif etype == "tool_end":
                 # Find the first unmatched tool call with this name
@@ -896,6 +981,10 @@ async def _run_agent_turn(
 
             elif etype == "agent_end":
                 live.update(_live_group())
+
+    # 停止权限 worker
+    if perm_mgr is not None:
+        perm_mgr.stop_worker()
 
     # ── Phase 2: render final result ─────────────────────────────────────
     # If no tool calls were made, treat thinking as response
