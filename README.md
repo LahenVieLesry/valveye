@@ -378,28 +378,3 @@ pytest tests/ -m "not integration" --cov=valveye
 <img src="img/contribution-calendar.svg" alt="Contribution Calendar">
 
 </div>
-
-## 🙏 致谢
-
-<details>
-<summary>点击展开</summary>
-
-本项目的成长离不开两段"算力接力"。
-
-首先要感谢 **GitHub Copilot 学生计划**——它陪伴本项目度过了最艰难的"嗷嗷待哺"时期，用免费额度一把屎一把尿地把代码拉扯大。好景不长，额度说没就没，项目一度陷入"断奶危机"。
-
-就在这个风雨飘摇的时刻，[小米 MiMo Orbit 百万亿 Token 创造者激励计划](https://100t.xiaomimimo.com/)——向本项目伸出了援手。
-
-起初，它羞涩地递来 **¥5 赠金**。
-
-说实话，看到这个数字的时候，我的内心毫无波澜，甚至想给它回一句"谢谢，够我跑两轮就不错了"。
-
-然后它又掏出了一个 **价值 ¥659 的 Max 月度套餐**。
-
-……好的，你赢了。
-
-从此，本项目告别了"一个请求掰两半用"的苦日子，终于可以放心大胆地让 Agent 反复燃烧 token 了。
-
-感谢小米，感谢 MiMo，感谢这个让穷学生也能玩得起大模型的时代。
-
-</details>
